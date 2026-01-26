@@ -2,7 +2,7 @@
  * bktr.c
  *
  * Copyright (c) 2018-2020, SciresM.
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -20,9 +20,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
-#include "bktr.h"
-#include "aes.h"
+#include <core/nxdt_utils.h>
+#include <core/bktr.h>
+#include <core/aes.h>
 
 /* Type definitions. */
 
@@ -58,7 +58,7 @@ typedef struct {
     u64 virtual_offset;
     u32 ctr_val;
     bool aes_ctr_ex_crypt;
-    u8 parent_storage_type; ///< BucketTreeStorageType.
+    BucketTreeStorageType parent_storage_type;
 } BucketTreeSubStorageReadParams;
 
 /* Global variables. */
@@ -75,7 +75,7 @@ static const char *g_bktrStorageTypeNames[] = {
 /* Function prototypes. */
 
 #if LOG_LEVEL <= LOG_LEVEL_ERROR
-static const char *bktrGetStorageTypeName(u8 storage_type);
+static const char *bktrGetStorageTypeName(BucketTreeStorageType storage_type);
 #endif
 
 static bool bktrInitializeIndirectStorageContext(BucketTreeContext *out, NcaFsSectionContext *nca_fs_ctx, bool is_sparse);
@@ -90,7 +90,7 @@ static bool bktrGetCompressedStorageEntryExtents(BucketTreeVisitor *visitor, u64
 static bool bktrReadCompressedStorage(BucketTreeVisitor *visitor, void *out, u64 read_size, u64 offset);
 
 static bool bktrReadSubStorage(BucketTreeSubStorage *substorage, BucketTreeSubStorageReadParams *params);
-NX_INLINE void bktrInitializeSubStorageReadParams(BucketTreeSubStorageReadParams *out, void *buffer, u64 offset, u64 size, u64 virtual_offset, u32 ctr_val, bool aes_ctr_ex_crypt, u8 parent_storage_type);
+NX_INLINE void bktrInitializeSubStorageReadParams(BucketTreeSubStorageReadParams *out, void *buffer, u64 offset, u64 size, u64 virtual_offset, u32 ctr_val, bool aes_ctr_ex_crypt, BucketTreeStorageType parent_storage_type);
 
 static bool bktrVerifyBucketInfo(NcaBucketInfo *bucket, u64 node_size, u64 entry_size, u64 *out_node_storage_size, u64 *out_entry_storage_size);
 static bool bktrValidateTableOffsetNode(const BucketTreeTable *table, u64 node_size, u64 entry_size, u32 entry_count, u64 *out_start_offset, u64 *out_end_offset);
@@ -135,7 +135,7 @@ NX_INLINE bool bktrVisitorIsValid(BucketTreeVisitor *visitor);
 NX_INLINE bool bktrVisitorCanMoveNext(BucketTreeVisitor *visitor);
 static bool bktrVisitorMoveNext(BucketTreeVisitor *visitor);
 
-bool bktrInitializeContext(BucketTreeContext *out, NcaFsSectionContext *nca_fs_ctx, u8 storage_type)
+bool bktrInitializeContext(BucketTreeContext *out, NcaFsSectionContext *nca_fs_ctx, BucketTreeStorageType storage_type)
 {
     if (!out || !nca_fs_ctx || !nca_fs_ctx->enabled || nca_fs_ctx->section_type >= NcaFsSectionType_Invalid || !nca_fs_ctx->nca_ctx || \
         (nca_fs_ctx->nca_ctx->rights_id_available && !nca_fs_ctx->nca_ctx->titlekey_retrieved) || storage_type == BucketTreeStorageType_Compressed || \
@@ -175,7 +175,7 @@ bool bktrInitializeCompressedStorageContext(BucketTreeContext *out, BucketTreeSu
     if (!out || !bktrIsValidSubStorage(substorage) || substorage->index != 0 || !substorage->nca_fs_ctx->enabled || !substorage->nca_fs_ctx->has_compression_layer || \
         substorage->nca_fs_ctx->section_type >= NcaFsSectionType_Invalid || !substorage->nca_fs_ctx->nca_ctx || \
         (substorage->nca_fs_ctx->nca_ctx->rights_id_available && !substorage->nca_fs_ctx->nca_ctx->titlekey_retrieved) || \
-        substorage->type == BucketTreeSubStorageType_AesCtrEx || substorage->type == BucketTreeSubStorageType_Compressed || substorage->type >= BucketTreeSubStorageType_Count)
+        substorage->type == BucketTreeSubStorageType_AesCtrEx || substorage->type >= BucketTreeSubStorageType_Count)
     {
         LOG_MSG_ERROR("Invalid parameters!");
         return false;
@@ -208,7 +208,7 @@ bool bktrInitializeCompressedStorageContext(BucketTreeContext *out, BucketTreeSu
 
     /* Read Compressed storage table data. */
     const u64 compression_table_offset = (nca_fs_ctx->hash_region.size + compressed_bucket->offset);
-    bktrInitializeSubStorageReadParams(&params, compressed_table, compression_table_offset, compressed_bucket->size, 0, 0, false, BucketTreeSubStorageType_Compressed);
+    bktrInitializeSubStorageReadParams(&params, compressed_table, compression_table_offset, compressed_bucket->size, 0, 0, false, BucketTreeStorageType_Compressed);
 
     if (!bktrReadSubStorage(substorage, &params))
     {
@@ -286,10 +286,10 @@ bool bktrSetRegularSubStorage(BucketTreeContext *ctx, NcaFsSectionContext *nca_f
 bool bktrSetBucketTreeSubStorage(BucketTreeContext *parent_ctx, BucketTreeContext *child_ctx, u8 substorage_index)
 {
     if (!bktrIsValidContext(parent_ctx) || !bktrIsValidContext(child_ctx) || substorage_index >= BKTR_MAX_SUBSTORAGE_COUNT || \
-        parent_ctx->storage_type != BucketTreeStorageType_Indirect || child_ctx->storage_type < BucketTreeStorageType_AesCtrEx || \
-        child_ctx->storage_type > BucketTreeStorageType_Sparse || (child_ctx->storage_type == BucketTreeStorageType_AesCtrEx && (substorage_index != 1 || \
-        parent_ctx->nca_fs_ctx != child_ctx->nca_fs_ctx)) || ((child_ctx->storage_type == BucketTreeStorageType_Compressed || \
-        child_ctx->storage_type == BucketTreeStorageType_Sparse) && (substorage_index != 0 || parent_ctx->nca_fs_ctx == child_ctx->nca_fs_ctx)))
+        parent_ctx->storage_type != BucketTreeStorageType_Indirect || (child_ctx->storage_type != BucketTreeStorageType_AesCtrEx && \
+        child_ctx->storage_type != BucketTreeStorageType_Sparse) || (child_ctx->storage_type == BucketTreeStorageType_AesCtrEx && (substorage_index != 1 || \
+        parent_ctx->nca_fs_ctx != child_ctx->nca_fs_ctx)) || (child_ctx->storage_type == BucketTreeStorageType_Sparse && (substorage_index != 0 || \
+        parent_ctx->nca_fs_ctx == child_ctx->nca_fs_ctx)))
     {
         LOG_MSG_ERROR("Invalid parameters!");
         return false;
@@ -301,7 +301,7 @@ bool bktrSetBucketTreeSubStorage(BucketTreeContext *parent_ctx, BucketTreeContex
 
     substorage->index = substorage_index;
     substorage->nca_fs_ctx = child_ctx->nca_fs_ctx;
-    substorage->type = (child_ctx->storage_type + 1);   /* Convert to BucketTreeSubStorageType value. */
+    substorage->type = (child_ctx->storage_type == BucketTreeStorageType_AesCtrEx ? BucketTreeSubStorageType_AesCtrEx : BucketTreeSubStorageType_Sparse);
     substorage->bktr_ctx = child_ctx;
 
     return true;
@@ -501,7 +501,7 @@ end:
 }
 
 #if LOG_LEVEL <= LOG_LEVEL_ERROR
-static const char *bktrGetStorageTypeName(u8 storage_type)
+static const char *bktrGetStorageTypeName(BucketTreeStorageType storage_type)
 {
     return (storage_type < BucketTreeStorageType_Count ? g_bktrStorageTypeNames[storage_type] : NULL);
 }
@@ -677,8 +677,10 @@ end:
 static bool bktrReadIndirectStorage(BucketTreeVisitor *visitor, void *out, u64 read_size, u64 offset)
 {
     BucketTreeContext *ctx = visitor->bktr_ctx;
+
     bool is_sparse = (ctx->storage_type == BucketTreeStorageType_Sparse);
-    bool missing_original_storage = !bktrIsValidSubStorage(&(ctx->substorages[0]));
+    bool original_storage_available = bktrIsValidSubStorage(&(ctx->substorages[0]));
+    bool aes_ctr_ex_storage_available = (!is_sparse && bktrIsValidSubStorage(&(ctx->substorages[1])) && ctx->substorages[1].type == BucketTreeSubStorageType_AesCtrEx);
 
     BucketTreeIndirectStorageEntry cur_entry = {0};
     BucketTreeSubStorageReadParams params = {0};
@@ -686,10 +688,9 @@ static bool bktrReadIndirectStorage(BucketTreeVisitor *visitor, void *out, u64 r
 
     bool success = false;
 
-    if (!out || (is_sparse && (missing_original_storage || ctx->substorages[0].type != BucketTreeSubStorageType_Regular)) || \
-        (!is_sparse && (!bktrIsValidSubStorage(&(ctx->substorages[1])) || ctx->substorages[1].type != BucketTreeSubStorageType_AesCtrEx || \
-        (!missing_original_storage && (ctx->substorages[0].type == BucketTreeSubStorageType_Indirect || ctx->substorages[0].type == BucketTreeSubStorageType_AesCtrEx || \
-        ctx->substorages[0].type >= BucketTreeSubStorageType_Count)))) || (offset + read_size) > ctx->end_offset)
+    if (!out || (is_sparse && (!original_storage_available || ctx->substorages[0].type != BucketTreeSubStorageType_Regular)) || \
+        (!is_sparse && original_storage_available && (ctx->substorages[0].type == BucketTreeSubStorageType_Indirect || ctx->substorages[0].type == BucketTreeSubStorageType_AesCtrEx || \
+        ctx->substorages[0].type >= BucketTreeSubStorageType_Count)) || (offset + read_size) > ctx->end_offset)
     {
         LOG_MSG_ERROR("Invalid parameters!");
         return false;
@@ -723,7 +724,7 @@ static bool bktrReadIndirectStorage(BucketTreeVisitor *visitor, void *out, u64 r
 
         if (cur_entry.storage_index == BucketTreeIndirectStorageIndex_Original)
         {
-            if (!missing_original_storage)
+            if (original_storage_available)
             {
                 /* Retrieve data from the original data storage. */
                 /* This must either be a Regular/Sparse/Compressed storage from the base NCA (Indirect) or a Regular storage from this very same NCA (Sparse). */
@@ -737,7 +738,12 @@ static bool bktrReadIndirectStorage(BucketTreeVisitor *visitor, void *out, u64 r
                 goto end;
             }
         } else {
-            if (!is_sparse)
+            if (is_sparse)
+            {
+                /* Fill output buffer with zeroes (SparseStorage's ZeroStorage). */
+                memset(out_ptr, 0, indirect_block_read_size);
+            } else
+            if (aes_ctr_ex_storage_available)
             {
                 /* Retrieve data from the Indirect data storage. */
                 /* This must always be the AesCtrEx storage within this very same NCA (Indirect). */
@@ -747,8 +753,8 @@ static bool bktrReadIndirectStorage(BucketTreeVisitor *visitor, void *out, u64 r
                     goto end;
                 }
             } else {
-                /* Fill output buffer with zeroes (SparseStorage's ZeroStorage). */
-                memset(out_ptr, 0, indirect_block_read_size);
+                LOG_MSG_ERROR("Error: attempting to read 0x%lX-byte long chunk from missing AesCtrEx storage at offset 0x%lX!", indirect_block_read_size, indirect_block_read_offset);
+                goto end;
             }
         }
 
@@ -765,7 +771,7 @@ end:
 
 static bool bktrInitializeAesCtrExStorageContext(BucketTreeContext *out, NcaFsSectionContext *nca_fs_ctx)
 {
-    if (nca_fs_ctx->section_type != NcaFsSectionType_PatchRomFs || !nca_fs_ctx->header.patch_info.aes_ctr_ex_bucket.size)
+    if (nca_fs_ctx->section_type != NcaFsSectionType_PatchRomFs || !nca_fs_ctx->has_patch_aes_ctr_ex_layer)
     {
         LOG_MSG_ERROR("Invalid parameters!");
         return false;
@@ -1054,7 +1060,7 @@ static bool bktrReadCompressedStorage(BucketTreeVisitor *visitor, void *out, u64
     bool success = false;
 
     if (!out || !bktrIsValidSubStorage(&(ctx->substorages[0])) || ctx->substorages[0].type == BucketTreeSubStorageType_AesCtrEx || \
-        ctx->substorages[0].type == BucketTreeSubStorageType_Compressed || ctx->substorages[0].type >= BucketTreeSubStorageType_Count || (offset + read_size) > ctx->end_offset)
+        ctx->substorages[0].type >= BucketTreeSubStorageType_Count || (offset + read_size) > ctx->end_offset)
     {
         LOG_MSG_ERROR("Invalid parameters!");
         return false;
@@ -1204,7 +1210,7 @@ static bool bktrReadSubStorage(BucketTreeSubStorage *substorage, BucketTreeSubSt
     return success;
 }
 
-NX_INLINE void bktrInitializeSubStorageReadParams(BucketTreeSubStorageReadParams *out, void *buffer, u64 offset, u64 size, u64 virtual_offset, u32 ctr_val, bool aes_ctr_ex_crypt, u8 parent_storage_type)
+NX_INLINE void bktrInitializeSubStorageReadParams(BucketTreeSubStorageReadParams *out, void *buffer, u64 offset, u64 size, u64 virtual_offset, u32 ctr_val, bool aes_ctr_ex_crypt, BucketTreeStorageType parent_storage_type)
 {
     out->buffer = buffer;
     out->offset = offset;
@@ -1253,10 +1259,12 @@ static bool bktrValidateTableOffsetNode(const BucketTreeTable *table, u64 node_s
     u32 offset_count = bktrGetOffsetCount(node_size);
     u32 entry_set_count = bktrGetEntrySetCount(node_size, entry_size, entry_count);
 
-    const u64 start_offset = ((offset_count < entry_set_count && node_header->count < offset_count) ? *bktrGetOffsetNodeEnd(offset_node) : *bktrGetOffsetNodeBegin(offset_node));
+    u64 node_start_offset = *bktrGetOffsetNodeBegin(offset_node);
+
+    u64 start_offset = ((offset_count < entry_set_count && node_header->count < offset_count) ? *bktrGetOffsetNodeEnd(offset_node) : node_start_offset);
     u64 end_offset = node_header->offset;
 
-    if (start_offset > *bktrGetOffsetNodeBegin(offset_node) || start_offset >= end_offset || node_header->count != entry_set_count)
+    if (start_offset > node_start_offset || start_offset >= end_offset || node_header->count != entry_set_count)
     {
         LOG_MSG_ERROR("Invalid Bucket Tree Offset Node!");
         return false;
@@ -1353,13 +1361,14 @@ static bool bktrFindStorageEntry(BucketTreeContext *ctx, u64 virtual_offset, Buc
 
     /* Get the entry node index. */
     u32 entry_set_index = 0;
+    const u64 *node_start_ptr = bktrGetOffsetNodeBegin(offset_node), *node_end_ptr = bktrGetOffsetNodeEnd(offset_node);
     const u64 *start_ptr = NULL, *end_ptr = NULL;
     bool success = false;
 
-    if (bktrIsExistOffsetL2OnL1(ctx) && virtual_offset < *bktrGetOffsetNodeBegin(offset_node))
+    if (bktrIsExistOffsetL2OnL1(ctx) && virtual_offset < *node_start_ptr)
     {
-        start_ptr = bktrGetOffsetNodeEnd(offset_node);
-        end_ptr = (bktrGetOffsetNodeBegin(offset_node) + ctx->offset_count);
+        start_ptr = node_end_ptr;
+        end_ptr = (node_start_ptr + ctx->offset_count);
 
         if (!bktrGetTreeNodeEntryIndex(start_ptr, end_ptr, virtual_offset, &entry_set_index))
         {
@@ -1367,8 +1376,8 @@ static bool bktrFindStorageEntry(BucketTreeContext *ctx, u64 virtual_offset, Buc
             goto end;
         }
     } else {
-        start_ptr = bktrGetOffsetNodeBegin(offset_node);
-        end_ptr = bktrGetOffsetNodeEnd(offset_node);
+        start_ptr = node_start_ptr;
+        end_ptr = node_end_ptr;
 
         if (!bktrGetTreeNodeEntryIndex(start_ptr, end_ptr, virtual_offset, &entry_set_index))
         {
@@ -1410,28 +1419,37 @@ static bool bktrGetTreeNodeEntryIndex(const u64 *start_ptr, const u64 *end_ptr, 
         return false;
     }
 
-    u64 *pos = (u64*)start_ptr;
-    u32 index = 0;
+    /* Perform a binary search. */
+    u32 offset_count = (u32)(end_ptr - start_ptr), low = 0, high = (offset_count - 1);
+    bool ret = false;
 
-    while(pos < end_ptr)
+    while(low <= high)
     {
-        if (start_ptr < pos)
+        /* Get the index to the middle offset within our current lookup range. */
+        u32 half = ((low + high) / 2);
+
+        /* Check middle offset value. */
+        const u64 *ptr = (start_ptr + half);
+        if (*ptr > virtual_offset)
         {
-            /* Stop looking if we have found the right offset node. */
-            if (*pos > virtual_offset) break;
+            /* Update our upper limit. */
+            high = (half - 1);
+        } else {
+            /* Check for success. */
+            if (half == (offset_count - 1) || *(ptr + 1) > virtual_offset)
+            {
+                /* Update output. */
+                *out_index = half;
+                ret = true;
+                break;
+            }
 
-            /* Increment index. */
-            index++;
+            /* Update our lower limit. */
+            low = (half + 1);
         }
-
-        /* Increment offset node pointer. */
-        pos++;
     }
 
-    /* Update output index. */
-    *out_index = index;
-
-    return true;
+    return ret;
 }
 
 static bool bktrGetEntryNodeEntryIndex(const BucketTreeNodeHeader *node_header, u64 entry_size, u64 virtual_offset, u32 *out_index)

@@ -1,7 +1,7 @@
 /*
  * title.h
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -24,6 +24,8 @@
 #ifndef __TITLE_H__
 #define __TITLE_H__
 
+#include <nxtc.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -37,14 +39,17 @@ extern "C" {
 
 #define TITLE_DELTA_ID_OFFSET               (u64)0xC00
 
-/// Generated using ns application records and/or ncm content meta keys.
-/// Used by the UI to display title lists.
+/// Define TitleApplicationMetadata type alias.
+typedef NxTitleCacheApplicationMetadata TitleApplicationMetadata;
+
+/// Used to display gamecard-specific title information.
 typedef struct {
-    u64 title_id;                   ///< Title ID from the application / system title this data belongs to.
-    NacpLanguageEntry lang_entry;   ///< UTF-8 strings in the console language.
-    u32 icon_size;                  ///< JPEG icon size.
-    u8 *icon;                       ///< JPEG icon data.
-} TitleApplicationMetadata;
+    TitleApplicationMetadata *app_metadata; ///< User application metadata.
+    bool has_patch;                         ///< Set to true if a patch is also available in the inserted gamecard for this user application.
+    Version version;                        ///< Reflects the title version stored in the inserted gamecard, either from a base application or a patch.
+    char display_version[0x20];             ///< Reflects the title display version from the NACP belonging to either a base application or a patch.
+    u32 dlc_count;                          ///< Reflects the number of DLCs available for this application in the inserted gamecard.
+} TitleGameCardApplicationMetadata;
 
 /// Generated using ncm calls.
 /// User applications: the previous/next pointers reference other user applications with the same ID.
@@ -52,15 +57,15 @@ typedef struct {
 /// Add-on contents: the previous/next pointers reference sibling add-on contents.
 /// Add-on content patches: the previous/next pointers reference other patches with the same ID and/or other patches for sibling add-on contents.
 typedef struct _TitleInfo {
-    u8 storage_id;                                  ///< NcmStorageId.
-    NcmContentMetaKey meta_key;                     ///< Used with ncm calls.
-    Version version;                                ///< Holds the same value from meta_key.version.
-    u32 content_count;                              ///< Content info count.
-    NcmContentInfo *content_infos;                  ///< Content info entries from this title.
-    u64 size;                                       ///< Total title size.
-    char size_str[32];                              ///< Total title size string.
-    TitleApplicationMetadata *app_metadata;         ///< User application metadata.
-    struct _TitleInfo *previous, *next;             ///< Linked lists.
+    u8 storage_id;                          ///< NcmStorageId.
+    NcmContentMetaKey meta_key;             ///< Used with ncm calls.
+    Version version;                        ///< Holds the same value from meta_key.version.
+    u32 content_count;                      ///< Content info count.
+    NcmContentInfo *content_infos;          ///< Content info entries from this title.
+    u64 size;                               ///< Total title size.
+    char size_str[0x20];                    ///< Total title size string.
+    TitleApplicationMetadata *app_metadata; ///< User application metadata.
+    struct _TitleInfo *previous, *next;     ///< Linked lists.
 } TitleInfo;
 
 /// Used to deal with user applications stored in the eMMC, SD card and/or gamecard.
@@ -72,7 +77,7 @@ typedef struct {
     TitleInfo *aoc_patch_info;  ///< Pointer to a TitleInfo element for the first detected add-on content patch entry matching the provided application ID.
 } TitleUserApplicationData;
 
-typedef enum {
+typedef enum : u8 {
     TitleNamingConvention_Full             = 0, ///< Individual titles: "{Name} [{Id}][v{Version}][{Type}]".
                                                 ///< Gamecards: "{Name1} [{Id1}][v{Version1}] + ... + {NameN} [{IdN}][v{VersionN}]".
     TitleNamingConvention_IdAndVersionOnly = 1, ///< Individual titles: "{Id}_v{Version}_{Type}".
@@ -80,7 +85,7 @@ typedef enum {
     TitleNamingConvention_Count            = 2  ///< Total values supported by this enum.
 } TitleNamingConvention;
 
-typedef enum {
+typedef enum : u8 {
     TitleFileNameIllegalCharReplaceType_None               = 0,
     TitleFileNameIllegalCharReplaceType_IllegalFsChars     = 1,
     TitleFileNameIllegalCharReplaceType_KeepAsciiCharsOnly = 2,
@@ -102,17 +107,18 @@ NcmContentStorage *titleGetNcmStorageByStorageId(u8 storage_id);
 /// Returns a pointer to a dynamically allocated array of pointers to TitleApplicationMetadata entries, as well as their count. Returns NULL if an error occurs.
 /// If 'is_system' is true, TitleApplicationMetadata entries from available system titles (NcmStorageId_BuiltInSystem) will be returned.
 /// Otherwise, TitleApplicationMetadata entries from user applications with available content data (NcmStorageId_BuiltInUser, NcmStorageId_SdCard, NcmStorageId_GameCard) will be returned.
-/// The allocated buffer must be freed by the calling function using free().
+/// The allocated buffer must be freed by the caller using free().
 TitleApplicationMetadata **titleGetApplicationMetadataEntries(bool is_system, u32 *out_count);
 
-/// Returns a pointer to a dynamically allocated array of pointers to TitleApplicationMetadata entries with matching gamecard user titles, as well as their count. Returns NULL if an error occurs.
-/// The allocated buffer must be freed by the calling function using free().
-TitleApplicationMetadata **titleGetGameCardApplicationMetadataEntries(u32 *out_count);
+/// Returns a pointer to a dynamically allocated array of TitleGameCardApplicationMetadata elements generated from gamecard user titles, as well as their count.
+/// Returns NULL if an error occurs.
+/// The allocated buffer must be freed by the caller using free().
+TitleGameCardApplicationMetadata *titleGetGameCardApplicationMetadataEntries(u32 *out_count);
 
 /// Returns a pointer to a dynamically allocated TitleInfo element with a matching storage ID and title ID. Returns NULL if an error occurs.
 /// If NcmStorageId_Any is used, the first entry with a matching title ID is returned.
 /// Use titleFreeTitleInfo() to free the returned data.
-TitleInfo *titleGetInfoFromStorageByTitleId(u8 storage_id, u64 title_id);
+TitleInfo *titleGetTitleInfoEntryFromStorageByTitleId(u8 storage_id, u64 title_id);
 
 /// Frees a dynamically allocated TitleInfo element.
 void titleFreeTitleInfo(TitleInfo **info);
@@ -126,7 +132,7 @@ void titleFreeUserApplicationData(TitleUserApplicationData *user_app_data);
 
 /// Takes an input TitleInfo object with meta type NcmContentMetaType_AddOnContent or NcmContentMetaType_DataPatch.
 /// Returns a linked list of TitleInfo elements with title IDs matching the corresponding base/patch title ID, depending on the meta type of the input TitleInfo object.
-/// Particularly useful to display add-on-content base/patch titles related to a specific add-on-content (patch) entry.
+/// Particularly useful to display add-on-content patch titles related to a specific add-on-content base entry, or viceversa.
 /// Use titleFreeTitleInfo() to free the returned data.
 TitleInfo *titleGetAddOnContentBaseOrPatchList(TitleInfo *title_info);
 
@@ -142,17 +148,30 @@ TitleInfo **titleGetOrphanTitles(u32 *out_count);
 void titleFreeOrphanTitles(TitleInfo ***orphan_info);
 
 /// Checks if a gamecard status update has been detected by the background gamecard title info thread (e.g. after a new gamecard has been inserted, of after the current one has been taken out).
-/// If this function returns true and functions such as titleGetInfoFromStorageByTitleId(), titleGetUserApplicationData() or titleGetInfoFromOrphanTitles() have been previously called:
+/// If this function returns true and functions such as titleGetTitleInfoEntryFromStorageByTitleId(), titleGetUserApplicationData() or titleGetInfoFromOrphanTitles() have been previously called:
 ///     1. Their returned data must be freed.
 ///     2. They must be called again.
 bool titleIsGameCardInfoUpdated(void);
 
 /// Returns a pointer to a dynamically allocated buffer that holds a filename string suitable for output title dumps. Returns NULL if an error occurs.
-char *titleGenerateFileName(TitleInfo *title_info, u8 naming_convention, u8 illegal_char_replace_type);
+char *titleGenerateFileName(TitleInfo *title_info, TitleNamingConvention naming_convention, TitleFileNameIllegalCharReplaceType illegal_char_replace_type);
 
 /// Returns a pointer to a dynamically allocated buffer that holds a filename string suitable for output gamecard dumps. Returns NULL if an error occurs.
 /// A valid gamecard must be inserted, and title info must have been loaded from it accordingly.
-char *titleGenerateGameCardFileName(u8 naming_convention, u8 illegal_char_replace_type);
+char *titleGenerateGameCardFileName(TitleNamingConvention naming_convention, TitleFileNameIllegalCharReplaceType illegal_char_replace_type);
+
+/// Returns a pointer to a dynamically allocated buffer that holds a CSV representation of all available user/system title records, depending on the 'is_system' argument.
+/// 'out_csv_size' must be a valid pointer. It is used to store the size of the allocated buffer.
+/// 'out_proc_title_cnt' may optionally be provided. If available, it will be used to store the number of processed title records.
+/// If 'is_system' is false and 'use_gamecard' is true, gamecard title records will be appended to the output buffer.
+/// Both 'is_system' and 'use_gamecard' may not be set to true at the same time.
+/// Furthermore, if 'is_system' is set to false and orphan titles are available, their records will get appended to the output buffer.
+/// Returns NULL if an error occurs.
+char *titleGenerateTitleRecordsCsv(size_t *out_csv_size, u32 *out_proc_title_cnt, bool is_system, bool use_gamecard);
+
+/// Wrapper for nxtcWipeCache(). Completely wipes the internal title cache and deletes the title cache file from the SD card.
+/// Use with caution.
+void titleWipeLocalCache(void);
 
 /// Returns a pointer to a string holding a user-friendly name for the provided NcmStorageId value. Returns NULL if the provided value is invalid.
 const char *titleGetNcmStorageIdName(u8 storage_id);
@@ -165,7 +184,7 @@ const char *titleGetNcmContentMetaTypeName(u8 content_meta_type);
 
 /// Miscellaneous functions.
 
-NX_INLINE bool titleIsValidInfoBlock(TitleInfo *title_info)
+NX_INLINE bool titleIsValidInfoBlock(const TitleInfo *title_info)
 {
     return (title_info && title_info->storage_id >= NcmStorageId_GameCard && title_info->storage_id <= NcmStorageId_SdCard && title_info->meta_key.id && \
            ((title_info->meta_key.type >= NcmContentMetaType_SystemProgram && title_info->meta_key.type <= NcmContentMetaType_BootImagePackageSafe) || \

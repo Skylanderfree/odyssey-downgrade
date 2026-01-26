@@ -1,7 +1,7 @@
 /*
  * cert.c
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -19,12 +19,13 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
-#include "cert.h"
-#include "save.h"
-#include "gamecard.h"
+#include <core/nxdt_utils.h>
+#include <core/cert.h>
+#include <core/save.h>
+#include <core/gamecard.h>
+#include <core/bis_storage.h>
 
-#define CERT_SAVEFILE_PATH              BIS_SYSTEM_PARTITION_MOUNT_NAME "/save/80000000000000e0"
+#define CERT_BIS_SYSTEM_SAVEFILE_PATH   "/save/80000000000000e0"
 #define CERT_SAVEFILE_STORAGE_BASE_PATH "/certificate/"
 
 #define CERT_TYPE(sig)                  (pub_key_type == CertPubKeyType_Rsa4096 ? CertType_Sig##sig##_PubKeyRsa4096 : \
@@ -32,8 +33,8 @@
 
 /* Global variables. */
 
-static save_ctx_t *g_esCertSaveCtx = NULL;
 static Mutex g_esCertSaveMutex = 0;
+static save_ctx_t *g_esCertSaveCtx = NULL;
 
 /* Function prototypes. */
 
@@ -41,7 +42,7 @@ static bool certOpenEsCertSaveFile(void);
 static void certCloseEsCertSaveFile(void);
 
 static bool _certRetrieveCertificateByName(Certificate *dst, const char *name);
-static u8 certGetCertificateType(void *data, u64 data_size);
+static CertType certGetCertificateType(void *data, u64 data_size);
 
 static bool _certRetrieveCertificateChainBySignatureIssuer(CertificateChain *dst, const char *issuer);
 static u32 certGetCertificateCountInSignatureIssuer(const char *issuer);
@@ -190,21 +191,40 @@ static bool certOpenEsCertSaveFile(void)
 {
     if (g_esCertSaveCtx) return true;
 
-    g_esCertSaveCtx = save_open_savefile(CERT_SAVEFILE_PATH, 0);
+    const char *mount_name = NULL;
+    char savefile_path[64] = {0};
+    bool success = false;
+
+    /* Retrieve mount name for the eMMC BIS System partition. */
+    if (!(mount_name = bisStorageGetMountNameByBisPartitionId(FsBisPartitionId_System)))
+    {
+        LOG_MSG_ERROR("Failed to mount eMMC BIS System partition!");
+        goto end;
+    }
+
+    /* Generate savefile path. */
+    snprintf(savefile_path, sizeof(savefile_path), "%s:%s", mount_name, CERT_BIS_SYSTEM_SAVEFILE_PATH);
+
+    /* Initialize savefile context. */
+    g_esCertSaveCtx = save_open_savefile(savefile_path, 0);
     if (!g_esCertSaveCtx)
     {
         LOG_MSG_ERROR("Failed to open ES certificate system savefile!");
-        return false;
+        goto end;
     }
 
-    return true;
+    /* Update flag. */
+    success = true;
+
+end:
+    return success;
 }
 
 static void certCloseEsCertSaveFile(void)
 {
     if (!g_esCertSaveCtx) return;
-    save_close_savefile(g_esCertSaveCtx);
-    g_esCertSaveCtx = NULL;
+
+    save_close_savefile(&g_esCertSaveCtx);
 }
 
 static bool _certRetrieveCertificateByName(Certificate *dst, const char *name)
@@ -258,7 +278,7 @@ static bool _certRetrieveCertificateByName(Certificate *dst, const char *name)
     return true;
 }
 
-static u8 certGetCertificateType(void *data, u64 data_size)
+static CertType certGetCertificateType(void *data, u64 data_size)
 {
     if (!data || data_size < SIGNED_CERT_MIN_SIZE || data_size > SIGNED_CERT_MAX_SIZE)
     {
@@ -266,8 +286,9 @@ static u8 certGetCertificateType(void *data, u64 data_size)
         return CertType_None;
     }
 
-    u32 sig_type = 0, pub_key_type = 0;
-    u8 type = CertType_None;
+    SignatureType sig_type = SignatureType_Invalid;
+    CertPubKeyType pub_key_type = CertPubKeyType_Count;
+    CertType type = CertType_None;
 
     /* Get signature and public key types. */
     sig_type = signatureGetTypeFromSignedBlob(data, true);

@@ -1,7 +1,7 @@
 /*
  * cert.h
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -43,7 +43,7 @@ typedef struct { \
 } CertSig##sigtype##PubKey##pubkeytype; \
 NXDT_ASSERT(CertSig##sigtype##PubKey##pubkeytype, certsize);
 
-typedef enum {
+typedef enum : u32 {
     CertPubKeyType_Rsa4096 = 0,
     CertPubKeyType_Rsa2048 = 1,
     CertPubKeyType_Ecc480  = 2,
@@ -53,9 +53,9 @@ typedef enum {
 /// Placed after the certificate signature block.
 typedef struct {
     char issuer[0x40];
-    u32 pub_key_type;   ///< CertPubKeyType. Always stored using big endian byte order.
+    CertPubKeyType pub_key_type;    ///< Always stored using big endian byte order.
     char name[0x40];
-    u32 date;           ///< Stored using big endian byte order.
+    u32 date;                       ///< Stored using big endian byte order.
 } CertCommonBlock;
 
 NXDT_ASSERT(CertCommonBlock, 0x88);
@@ -109,7 +109,7 @@ GENERATE_CERT_STRUCT(Hmac160, Rsa2048, 0x200);  /// pub_key_type field must be C
 GENERATE_CERT_STRUCT(Hmac160, Ecc480, 0x140);   /// pub_key_type field must be CertPubKeyType_Ecc480.
 
 /// Certificate type.
-typedef enum {
+typedef enum : u8 {
     CertType_None                     = 0,
     CertType_SigRsa4096_PubKeyRsa4096 = 1,
     CertType_SigRsa4096_PubKeyRsa2048 = 2,
@@ -128,7 +128,7 @@ typedef enum {
 
 /// Used to store certificate type, size and raw data.
 typedef struct {
-    u8 type;                        ///< CertType.
+    CertType type;
     u64 size;                       ///< Raw certificate size.
     u8 data[SIGNED_CERT_MAX_SIZE];  ///< Raw certificate data.
 } Certificate;
@@ -158,26 +158,26 @@ u8 *certRetrieveRawCertificateChainFromGameCardByRightsId(const FsRightsId *id, 
 
 /// General purpose helper inline functions.
 
-NX_INLINE bool certIsValidPublicKeyType(u32 type)
+NX_INLINE bool certIsValidPublicKeyType(CertPubKeyType type)
 {
     return (type < CertPubKeyType_Count);
 }
 
-NX_INLINE u64 certGetPublicKeySizeByType(u32 type)
+NX_INLINE u64 certGetPublicKeySizeByType(CertPubKeyType type)
 {
     return (u64)(type == CertPubKeyType_Rsa4096 ? MEMBER_SIZE(CertPublicKeyBlockRsa4096, public_key) : \
                 (type == CertPubKeyType_Rsa2048 ? MEMBER_SIZE(CertPublicKeyBlockRsa2048, public_key) : \
                 (type == CertPubKeyType_Ecc480  ? MEMBER_SIZE(CertPublicKeyBlockEcc480,  public_key) : 0)));
 }
 
-NX_INLINE u64 certGetPublicKeyBlockSizeByType(u32 type)
+NX_INLINE u64 certGetPublicKeyBlockSizeByType(CertPubKeyType type)
 {
     return (u64)(type == CertPubKeyType_Rsa4096 ? sizeof(CertPublicKeyBlockRsa4096) : \
                 (type == CertPubKeyType_Rsa2048 ? sizeof(CertPublicKeyBlockRsa2048) : \
                 (type == CertPubKeyType_Ecc480  ? sizeof(CertPublicKeyBlockEcc480)  : 0)));
 }
 
-NX_INLINE u32 certGetPublicKeyTypeFromCommonBlock(CertCommonBlock *cert_common_block)
+NX_INLINE CertPubKeyType certGetPublicKeyTypeFromCommonBlock(CertCommonBlock *cert_common_block)
 {
     return (cert_common_block ? __builtin_bswap32(cert_common_block->pub_key_type) : CertPubKeyType_Count);
 }
@@ -195,7 +195,7 @@ NX_INLINE bool certIsValidSignedCertBlob(void *buf)
     return (cert_common_block && certIsValidPublicKeyType(certGetPublicKeyTypeFromCommonBlock(cert_common_block)));
 }
 
-NX_INLINE u32 certGetPublicKeyTypeFromSignedCertBlob(void *buf)
+NX_INLINE CertPubKeyType certGetPublicKeyTypeFromSignedCertBlob(void *buf)
 {
     return (certIsValidSignedCertBlob(buf) ? certGetPublicKeyTypeFromCommonBlock(certGetCommonBlockFromSignedCertBlob(buf)) : CertPubKeyType_Count);
 }
@@ -217,7 +217,7 @@ NX_INLINE u8 *certGetPublicKeyFromSignedCertBlob(void *buf)
 
 NX_INLINE u8 *certGetPublicExponentFromSignedCertBlob(void *buf)
 {
-    u32 pub_key_type = certGetPublicKeyTypeFromSignedCertBlob(buf);
+    CertPubKeyType pub_key_type = certGetPublicKeyTypeFromSignedCertBlob(buf);
     u8 *public_key = certGetPublicKeyFromSignedCertBlob(buf);
     return (pub_key_type < CertPubKeyType_Ecc480 ? (public_key + certGetPublicKeySizeByType(pub_key_type)) : NULL); // Only allow RSA public key types.
 }
@@ -245,7 +245,7 @@ NX_INLINE CertCommonBlock *certGetCommonBlockFromCertificate(Certificate *cert)
     return (certIsValidCertificate(cert) ? certGetCommonBlockFromSignedCertBlob(cert->data) : NULL);
 }
 
-NX_INLINE u32 certGetPublicKeyTypeFromCertificate(Certificate *cert)
+NX_INLINE CertPubKeyType certGetPublicKeyTypeFromCertificate(Certificate *cert)
 {
     return (certIsValidCertificate(cert) ? certGetPublicKeyTypeFromSignedCertBlob(cert->data) : CertPubKeyType_Count);
 }

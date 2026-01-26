@@ -1,7 +1,7 @@
 /*
  * pfs.c
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -19,11 +19,11 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
-#include "pfs.h"
-#include "npdm.h"
+#include <core/nxdt_utils.h>
+#include <core/pfs.h>
+#include <core/npdm.h>
 
-#define PFS_FULL_HEADER_ALIGNMENT   0x20
+#define PFS_HEADER_PADDING_ALIGNMENT    0x20
 
 bool pfsInitializeContext(PartitionFileSystemContext *out, NcaFsSectionContext *nca_fs_ctx)
 {
@@ -122,7 +122,7 @@ end:
 
 bool pfsReadPartitionData(PartitionFileSystemContext *ctx, void *out, u64 read_size, u64 offset)
 {
-    if (!ctx || !ncaStorageIsValidContext(&(ctx->storage_ctx)) || !ctx->size || !out || !read_size || (offset + read_size) > ctx->size)
+    if (!pfsIsValidContext(ctx) || !out || !read_size || (offset + read_size) > ctx->size)
     {
         LOG_MSG_ERROR("Invalid parameters!");
         return false;
@@ -226,8 +226,8 @@ bool pfsGetTotalDataSize(PartitionFileSystemContext *ctx, u64 *out_size)
 
 bool pfsGenerateEntryPatch(PartitionFileSystemContext *ctx, PartitionFileSystemEntry *fs_entry, const void *data, u64 data_size, u64 data_offset, NcaHierarchicalSha256Patch *out)
 {
-    if (!ctx || !ncaStorageIsValidContext(&(ctx->storage_ctx)) || ctx->storage_ctx.base_storage_type != NcaStorageBaseStorageType_Regular || !ctx->header_size || !ctx->header || \
-        !fs_entry || !fs_entry->size || (fs_entry->offset + fs_entry->size) > ctx->size || !data || !data_size || (data_offset + data_size) > fs_entry->size || !out)
+    if (!pfsIsValidContext(ctx) || !fs_entry || !fs_entry->size || (fs_entry->offset + fs_entry->size) > ctx->size || !data || !data_size || \
+        (data_offset + data_size) > fs_entry->size || !out)
     {
         LOG_MSG_ERROR("Invalid parameters!");
         return false;
@@ -244,26 +244,24 @@ bool pfsGenerateEntryPatch(PartitionFileSystemContext *ctx, PartitionFileSystemE
     return true;
 }
 
-bool pfsAddEntryInformationToFileContext(PartitionFileSystemFileContext *ctx, const char *entry_name, u64 entry_size, u32 *out_entry_idx)
+bool pfsAddEntryInformationToImageContext(PartitionFileSystemImageContext *ctx, const char *entry_name, u64 entry_size, u32 *out_entry_idx)
 {
-    if (!ctx || !entry_name || !*entry_name)
+    size_t entry_name_len = 0;
+
+    if (!ctx || !entry_name || !(entry_name_len = strlen(entry_name)))
     {
         LOG_MSG_ERROR("Invalid parameters!");
         return false;
     }
 
     PartitionFileSystemHeader *header = &(ctx->header);
-
     PartitionFileSystemEntry *tmp_pfs_entries = NULL, *cur_pfs_entry = NULL, *prev_pfs_entry = NULL;
-    u64 tmp_pfs_entries_size = ((header->entry_count + 1) * sizeof(PartitionFileSystemEntry));
-
-    char *tmp_name_table = NULL;
-    u32 tmp_name_table_size = (header->name_table_size + strlen(entry_name) + 1);
+    u32 unpadded_name_table_size = 0;
 
     /* Reallocate Partition FS entries. */
-    if (!(tmp_pfs_entries = realloc(ctx->entries, tmp_pfs_entries_size)))
+    if (!(tmp_pfs_entries = realloc(ctx->entries, (header->entry_count + 1) * sizeof(PartitionFileSystemEntry))))
     {
-        LOG_MSG_ERROR("Failed to reallocate Partition FS entries!");
+        LOG_MSG_ERROR("Failed to reallocate Partition FS entries! (%u).", header->entry_count + 1);
         return false;
     }
 
@@ -278,35 +276,58 @@ bool pfsAddEntryInformationToFileContext(PartitionFileSystemFileContext *ctx, co
 
     cur_pfs_entry->offset = (prev_pfs_entry ? (prev_pfs_entry->offset + prev_pfs_entry->size) : 0);
     cur_pfs_entry->size = entry_size;
-    cur_pfs_entry->name_offset = header->name_table_size;
+    cur_pfs_entry->name_offset = (prev_pfs_entry ? (prev_pfs_entry->name_offset + strlen(ctx->name_table + prev_pfs_entry->name_offset) + 1) : 0);
 
-    /* Reallocate Partition FS name table. */
-    if (!(tmp_name_table = realloc(ctx->name_table, tmp_name_table_size)))
+    /* Calculate unpadded name table size. Reserve space for a NULL terminator. */
+    unpadded_name_table_size = (cur_pfs_entry->name_offset + (u32)entry_name_len + 1);
+
+    /* Check if the name for this new entry exceeds our current name table size. */
+    if (unpadded_name_table_size >= header->name_table_size)
     {
-        LOG_MSG_ERROR("Failed to reallocate Partition FS name table!");
-        return false;
+        /* Calculate padded name table size. */
+        char *tmp_name_table = NULL;
+        u32 nameless_header_size = (u32)(sizeof(PartitionFileSystemHeader) + ((header->entry_count + 1) * sizeof(PartitionFileSystemEntry)));
+        u32 padded_name_table_size = (ALIGN_UP(nameless_header_size + unpadded_name_table_size, PFS_HEADER_PADDING_ALIGNMENT) - nameless_header_size);
+
+        /* Add manual padding if the full Partition FS header would already be properly aligned. */
+        if (padded_name_table_size == unpadded_name_table_size) padded_name_table_size += PFS_HEADER_PADDING_ALIGNMENT;
+
+        /* Reallocate Partition FS name table. */
+        if (!(tmp_name_table = realloc(ctx->name_table, padded_name_table_size)))
+        {
+            LOG_MSG_ERROR("Failed to reallocate Partition FS name table! (0x%X).", padded_name_table_size);
+            return false;
+        }
+
+        ctx->name_table = tmp_name_table;
+        tmp_name_table = NULL;
+
+        /* Clear new allocated area. */
+        memset(ctx->name_table + cur_pfs_entry->name_offset, 0, padded_name_table_size - cur_pfs_entry->name_offset);
+
+        /* Update Partition FS name table size. */
+        header->name_table_size = padded_name_table_size;
     }
 
-    ctx->name_table = tmp_name_table;
-    tmp_name_table = NULL;
-
-    /* Update Partition FS name table. */
-    sprintf(ctx->name_table + header->name_table_size, "%s", entry_name);
-    header->name_table_size = tmp_name_table_size;
+    /* Append new entry name to the Partition FS name table. */
+    memcpy(ctx->name_table + cur_pfs_entry->name_offset, entry_name, entry_name_len);
 
     /* Update output entry index. */
     if (out_entry_idx) *out_entry_idx = header->entry_count;
 
-    /* Update Partition FS entry count, name table size and data size. */
+    /* Update Partition FS entry count and data size. */
     header->entry_count++;
     ctx->fs_size += entry_size;
 
     return true;
 }
 
-bool pfsUpdateEntryNameFromFileContext(PartitionFileSystemFileContext *ctx, u32 entry_idx, const char *new_entry_name)
+bool pfsUpdateEntryNameFromImageContext(PartitionFileSystemImageContext *ctx, u32 entry_idx, const char *new_entry_name)
 {
-    if (!ctx || !ctx->header.entry_count || !ctx->header.name_table_size || !ctx->entries || !ctx->name_table || entry_idx >= ctx->header.entry_count || !new_entry_name || !*new_entry_name)
+    size_t new_entry_name_len = 0;
+
+    if (!ctx || !ctx->header.entry_count || !ctx->header.name_table_size || !ctx->entries || !ctx->name_table || entry_idx >= ctx->header.entry_count || \
+        !new_entry_name || !(new_entry_name_len = strlen(new_entry_name)))
     {
         LOG_MSG_ERROR("Invalid parameters!");
         return false;
@@ -315,7 +336,6 @@ bool pfsUpdateEntryNameFromFileContext(PartitionFileSystemFileContext *ctx, u32 
     PartitionFileSystemEntry *pfs_entry = &(ctx->entries[entry_idx]);
 
     char *name_table_entry = (ctx->name_table + pfs_entry->name_offset);
-    size_t new_entry_name_len = strlen(new_entry_name);
     size_t cur_entry_name_len = strlen(name_table_entry);
 
     if (new_entry_name_len > cur_entry_name_len)
@@ -324,12 +344,13 @@ bool pfsUpdateEntryNameFromFileContext(PartitionFileSystemFileContext *ctx, u32 
         return false;
     }
 
+    //if (new_entry_name_len < cur_entry_name_len) memset(name_table_entry + new_entry_name_len, 0, cur_entry_name_len - new_entry_name_len);
     memcpy(name_table_entry, new_entry_name, new_entry_name_len);
 
     return true;
 }
 
-bool pfsWriteFileContextHeaderToMemoryBuffer(PartitionFileSystemFileContext *ctx, void *buf, u64 buf_size, u64 *out_header_size)
+bool pfsWriteImageContextHeaderToMemoryBuffer(PartitionFileSystemImageContext *ctx, void *buf, u64 buf_size, u64 *out_header_size)
 {
     if (!ctx || !ctx->header.entry_count || !ctx->header.name_table_size || !ctx->entries || !ctx->name_table || !buf || !out_header_size)
     {
@@ -339,29 +360,22 @@ bool pfsWriteFileContextHeaderToMemoryBuffer(PartitionFileSystemFileContext *ctx
 
     PartitionFileSystemHeader *header = &(ctx->header);
     u8 *buf_u8 = (u8*)buf;
-    u64 header_size = 0, full_header_size = 0, block_offset = 0, block_size = 0;
-    u32 padding_size = 0;
+    u64 header_size = 0, block_offset = 0, block_size = 0;
 
     /* Calculate header size. */
     header_size = (sizeof(PartitionFileSystemHeader) + (header->entry_count * sizeof(PartitionFileSystemEntry)) + header->name_table_size);
 
-    /* Calculate full header size and padding size. */
-    full_header_size = (IS_ALIGNED(header_size, PFS_FULL_HEADER_ALIGNMENT) ? ALIGN_UP(header_size + 1, PFS_FULL_HEADER_ALIGNMENT) : ALIGN_UP(header_size, PFS_FULL_HEADER_ALIGNMENT));
-    padding_size = (u32)(full_header_size - header_size);
-
     /* Check buffer size. */
-    if (buf_size < full_header_size)
+    if (buf_size < header_size)
     {
-        LOG_MSG_ERROR("Not enough space available in input buffer to write full Partition FS header! (got 0x%lX, need 0x%lX).", buf_size, full_header_size);
+        LOG_MSG_ERROR("Not enough space available in input buffer to write full Partition FS header! (got 0x%lX, need 0x%lX).", buf_size, header_size);
         return false;
     }
 
     /* Write full header. */
-    header->name_table_size += padding_size;
     block_size = sizeof(PartitionFileSystemHeader);
     memcpy(buf_u8 + block_offset, header, block_size);
     block_offset += block_size;
-    header->name_table_size -= padding_size;
 
     block_size = (header->entry_count * sizeof(PartitionFileSystemEntry));
     memcpy(buf_u8 + block_offset, ctx->entries, block_size);
@@ -369,12 +383,9 @@ bool pfsWriteFileContextHeaderToMemoryBuffer(PartitionFileSystemFileContext *ctx
 
     block_size = header->name_table_size;
     memcpy(buf_u8 + block_offset, ctx->name_table, block_size);
-    block_offset += block_size;
-
-    memset(buf_u8 + block_offset, 0, padding_size);
 
     /* Update output header size. */
-    *out_header_size = full_header_size;
+    *out_header_size = header_size;
 
     return true;
 }

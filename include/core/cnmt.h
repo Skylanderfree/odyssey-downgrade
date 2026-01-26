@@ -1,7 +1,7 @@
 /*
  * cnmt.h
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -33,20 +33,24 @@ extern "C" {
 #define CNMT_DIGEST_SIZE    SHA256_HASH_SIZE
 
 /// Equivalent to NcmContentMetaAttribute.
-typedef enum {
+typedef enum : u8 {
     ContentMetaAttribute_None                = 0,
     ContentMetaAttribute_IncludesExFatDriver = BIT(0),
     ContentMetaAttribute_Rebootless          = BIT(1),
     ContentMetaAttribute_Compacted           = BIT(2),  ///< One or more NCAs use SparseInfo data.
-    ContentMetaAttribute_Count               = 3        ///< Total values supported by this enum.
+    ContentMetaAttribute_ProperProgramExists = BIT(3),
+    ContentMetaAttribute_Unknown1            = BIT(4),
+    ContentMetaAttribute_Unknown2            = BIT(5),
+    ContentMetaAttribute_Count               = 6        ///< Total values supported by this enum.
 } ContentMetaAttribute;
 
-typedef enum {
+typedef enum : u8 {
     ContentMetaPlatform_Nx    = 0,
-    ContentMetaPlatform_Count = 1   ///< Total values supported by this enum.
+    ContentMetaPlatform_Ounce = 1,
+    ContentMetaPlatform_Count = 2   ///< Total values supported by this enum.
 } ContentMetaPlatform;
 
-typedef enum {
+typedef enum : u8 {
     ContentMetaInstallState_None      = 0,
     ContentMetaInstallState_Committed = BIT(0),
     ContentMetaInstallState_Count     = 1       ///< Total values supported by this enum.
@@ -60,15 +64,15 @@ typedef enum {
 typedef struct {
     u64 title_id;
     Version version;
-    u8 content_meta_type;                       ///< NcmContentMetaType.
-    u8 content_meta_platform;                   ///< ContentMetaPlatform.
-    u16 extended_header_size;                   ///< Must match the size from the extended header struct for this content meta type (SystemUpdate, Application, Patch, AddOnContent, Delta).
-    u16 content_count;                          ///< Determines how many NcmPackagedContentInfo entries are available after the extended header.
-    u16 content_meta_count;                     ///< Determines how many NcmContentMetaInfo entries are available after the NcmPackagedContentInfo entries. Only used for SystemUpdate.
-    u8 content_meta_attribute;                  ///< ContentMetaAttribute.
-    u8 storage_id;                              ///< NcmStorageId.
-    u8 content_install_type;                    ///< NcmContentInstallType.
-    u8 install_state;                           ///< ContentMetaInstallState.
+    u8 content_meta_type;                           ///< NcmContentMetaType.
+    ContentMetaPlatform content_meta_platform;
+    u16 extended_header_size;                       ///< Must match the size from the extended header struct for this content meta type (SystemUpdate, Application, Patch, AddOnContent, Delta).
+    u16 content_count;                              ///< Determines how many NcmPackagedContentInfo entries are available after the extended header.
+    u16 content_meta_count;                         ///< Determines how many NcmContentMetaInfo entries are available after the NcmPackagedContentInfo entries. Only used for SystemUpdate.
+    ContentMetaAttribute content_meta_attribute;
+    u8 storage_id;                                  ///< NcmStorageId.
+    u8 content_install_type;                        ///< NcmContentInstallType.
+    ContentMetaInstallState install_state;
     Version required_download_system_version;
     u8 reserved[0x4];
 } ContentMetaPackagedContentMetaHeader;
@@ -104,7 +108,7 @@ typedef struct {
 
 NXDT_ASSERT(ContentMetaPatchMetaExtendedHeader, 0x18);
 
-typedef enum {
+typedef enum : u8 {
     ContentMetaContentAccessibility_None       = 0,
     ContentMetaContentAccessibility_Individual = BIT(0),
     ContentMetaContentAccessibility_Count      = 1          ///< Total values supported by this enum.
@@ -115,7 +119,7 @@ typedef enum {
 typedef struct {
     u64 application_id;
     Version required_application_version;
-    u8 content_accessibility;               ///< ContentMetaContentAccessibility.
+    ContentMetaContentAccessibility content_accessibility;
     u8 reserved[0x3];
     u64 data_patch_id;
 } ContentMetaAddOnContentMetaExtendedHeader;
@@ -153,7 +157,7 @@ typedef struct {
 
 NXDT_ASSERT(ContentMetaDataPatchMetaExtendedHeader, 0x20);
 
-typedef enum {
+typedef enum : u32 {
     ContentMetaFirmwareVariationVersion_Invalid = 0,
     ContentMetaFirmwareVariationVersion_V1      = 1,
     ContentMetaFirmwareVariationVersion_V2      = 2,
@@ -168,8 +172,8 @@ typedef enum {
 ///     * 'variation_count' ContentMetaFirmwareVariationInfoV2 entries.
 ///     * (Optionally) A variable number of NcmContentMetaInfo entries, which is the sum of all 'meta_count' values from ContentMetaFirmwareVariationInfoV2 entries where 'refer_to_base' is set to false.
 typedef struct {
-    u32 version;            ///< ContentMetaFirmwareVariationVersion.
-    u32 variation_count;    ///< Determines how many firmware variation entries are available after this header.
+    ContentMetaFirmwareVariationVersion version;
+    u32 variation_count;                            ///< Determines how many firmware variation entries are available after this header.
 } ContentMetaSystemUpdateMetaExtendedDataHeader;
 
 NXDT_ASSERT(ContentMetaSystemUpdateMetaExtendedDataHeader, 0x8);
@@ -246,7 +250,7 @@ typedef struct {
 
 NXDT_ASSERT(ContentMetaPatchDeltaHeader, 0x28);
 
-typedef enum {
+typedef enum : u8 {
     ContentMetaUpdateType_ApplyAsDelta = 0,
     ContentMetaUpdateType_Overwrite    = 1,
     ContentMetaUpdateType_Create       = 2,
@@ -262,8 +266,8 @@ typedef struct {
     u16 destination_size_high;
     u32 destination_size_low;
     u16 fragment_count;
-    u8 fragment_target_content_type;                ///< NcmContentType.
-    u8 update_type;                                 ///< ContentMetaUpdateType.
+    u8 fragment_target_content_type;        ///< NcmContentType.
+    ContentMetaUpdateType update_type;
     u8 reserved[0x4];
 } ContentMetaFragmentSet;
 #pragma pack(pop)
@@ -317,6 +321,9 @@ typedef struct {
 
 /// Initializes a ContentMetaContext using a previously initialized NcaContext (which must belong to a Meta NCA).
 bool cnmtInitializeContext(ContentMetaContext *out, NcaContext *nca_ctx);
+
+/// Looks for a NcmPackagedContentInfo entry with a content ID that matches the one from the input NcaContext and verifies its hash.
+bool cnmtVerifyContentHash(ContentMetaContext *cnmt_ctx, NcaContext *nca_ctx, const u8 *hash);
 
 /// Updates NcmPackagedContentInfo data for the content entry with size, type and ID offset values that match the ones from the input NcaContext.
 bool cnmtUpdateContentInfo(ContentMetaContext *cnmt_ctx, NcaContext *nca_ctx);

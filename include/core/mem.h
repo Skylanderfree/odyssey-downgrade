@@ -2,7 +2,7 @@
  * mem.h
  *
  * Copyright (c) 2019, shchmue.
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -29,18 +29,18 @@
 extern "C" {
 #endif
 
-typedef enum {
+typedef enum : u8 {
     MemoryProgramSegmentType_None   = 0,
     MemoryProgramSegmentType_Text   = BIT(0),
-    MemoryProgramSegmentType_Rodata = BIT(1),
+    MemoryProgramSegmentType_RoData = BIT(1),
     MemoryProgramSegmentType_Data   = BIT(2),
-    MemoryProgramSegmentType_All    = (MemoryProgramSegmentType_Data | MemoryProgramSegmentType_Rodata | MemoryProgramSegmentType_Text),
+    MemoryProgramSegmentType_All    = (MemoryProgramSegmentType_Data | MemoryProgramSegmentType_RoData | MemoryProgramSegmentType_Text),
     MemoryProgramSegmentType_Limit  = (MemoryProgramSegmentType_All + 1)                                                                    ///< Placed here for convenience.
 } MemoryProgramSegmentType;
 
 typedef struct {
     u64 program_id;
-    u8 mask;        ///< MemoryProgramSegmentType. Used with memRetrieveProgramMemorySegment(). Ignored in memRetrieveFullProgramMemory().
+    MemoryProgramSegmentType mask;  ///< Used with memRetrieveProgramMemorySegment(). Ignored in memRetrieveFullProgramMemory().
     u8 *data;
     u64 data_size;
 } MemoryLocation;

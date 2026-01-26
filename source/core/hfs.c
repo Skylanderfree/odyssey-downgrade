@@ -1,7 +1,7 @@
 /*
  * hfs.c
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -19,8 +19,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
-#include "gamecard.h"
+#include <core/nxdt_utils.h>
+#include <core/gamecard.h>
 
 #define HFS_PARTITION_NAME_INDEX(x) ((x) - 1)
 
@@ -145,7 +145,7 @@ end:
     return ret;
 }
 
-const char *hfsGetPartitionNameString(u8 hfs_partition_type)
+const char *hfsGetPartitionNameString(HashFileSystemPartitionType hfs_partition_type)
 {
     return ((hfs_partition_type > HashFileSystemPartitionType_None && hfs_partition_type < HashFileSystemPartitionType_Count) ? \
             g_hfsPartitionNames[HFS_PARTITION_NAME_INDEX(hfs_partition_type)] : NULL);

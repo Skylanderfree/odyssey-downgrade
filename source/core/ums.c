@@ -1,7 +1,7 @@
 /*
  * ums.c
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -19,7 +19,7 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
+#include <core/nxdt_utils.h>
 
 /* Global variables. */
 
@@ -139,7 +139,7 @@ static void umsFreeDeviceData(void)
 
 static void umsPopulateCallback(const UsbHsFsDevice *devices, u32 device_count, void *user_data)
 {
-    (void)user_data;
+    NX_IGNORE_ARG(user_data);
 
     SCOPED_LOCK(&g_umsMutex)
     {

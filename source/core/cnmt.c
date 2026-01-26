@@ -1,7 +1,7 @@
 /*
  * cnmt.c
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -19,9 +19,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
-#include "cnmt.h"
-#include "title.h"
+#include <core/nxdt_utils.h>
+#include <core/cnmt.h>
+#include <core/title.h>
 
 /* Helper macros. */
 
@@ -33,7 +33,8 @@
 static const char *g_cnmtAttributeStrings[ContentMetaAttribute_Count] = {
     "IncludesExFatDriver",
     "Rebootless",
-    "Compacted"
+    "Compacted",
+    "ProperProgramExists"
 };
 
 /* Function prototypes. */
@@ -269,6 +270,57 @@ end:
     return success;
 }
 
+bool cnmtVerifyContentHash(ContentMetaContext *cnmt_ctx, NcaContext *nca_ctx, const u8 *hash)
+{
+    if (!cnmtIsValidContext(cnmt_ctx) || !nca_ctx || !*(nca_ctx->content_id_str) || nca_ctx->content_type > NcmContentType_DeltaFragment || !nca_ctx->content_size || !hash)
+    {
+        LOG_MSG_ERROR("Invalid parameters!");
+        return false;
+    }
+
+    /* Return right away if we're dealing with a Meta NCA. */
+    if (nca_ctx->content_type == NcmContentType_Meta) return true;
+
+    NcmPackagedContentInfo *packaged_content_info = NULL;
+    bool success = false;
+
+    /* Loop through all of our content info entries. */
+    for(u16 i = 0; i < cnmt_ctx->packaged_header->content_count; i++)
+    {
+        /* Check if we got a matching content ID. */
+        packaged_content_info = &(cnmt_ctx->packaged_content_info[i]);
+
+        if (!memcmp(&(packaged_content_info->info.content_id), &(nca_ctx->content_id), sizeof(NcmContentId))) break;
+
+        packaged_content_info = NULL;
+    }
+
+    if (!packaged_content_info)
+    {
+        LOG_MSG_ERROR("Unable to find CNMT content record for \"%s\" NCA! (title ID %016lX, size 0x%lX, type 0x%02X, ID offset 0x%02X).", nca_ctx->content_id_str, \
+                      cnmt_ctx->packaged_header->title_id, nca_ctx->content_size, nca_ctx->content_type, nca_ctx->id_offset);
+        goto end;
+    }
+
+    /* Verify content hash. */
+    success = (memcmp(packaged_content_info->hash, hash, SHA256_HASH_SIZE) == 0);
+#if LOG_LEVEL <= LOG_LEVEL_ERROR
+    if (!success)
+    {
+        char got[SHA256_HASH_STR_SIZE] = {0}, expected[SHA256_HASH_STR_SIZE] = {0};
+
+        utilsGenerateHexString(got, sizeof(got), hash, SHA256_HASH_SIZE, true);
+        utilsGenerateHexString(expected, sizeof(expected), packaged_content_info->hash, SHA256_HASH_SIZE, true);
+
+        LOG_MSG_ERROR("Invalid hash for \"%s\" NCA! Got \"%s\", expected \"%s\" (title ID %016lX, size 0x%lX, type 0x%02X, ID offset 0x%02X).", nca_ctx->content_id_str, \
+                      got, expected, cnmt_ctx->packaged_header->title_id, nca_ctx->content_size, nca_ctx->content_type, nca_ctx->id_offset);
+    }
+#endif
+
+end:
+    return success;
+}
+
 bool cnmtUpdateContentInfo(ContentMetaContext *cnmt_ctx, NcaContext *nca_ctx)
 {
     if (!cnmtIsValidContext(cnmt_ctx) || !nca_ctx || !*(nca_ctx->content_id_str) || !*(nca_ctx->hash_str) || nca_ctx->content_type > NcmContentType_DeltaFragment || !nca_ctx->content_size)
@@ -302,7 +354,7 @@ bool cnmtUpdateContentInfo(ContentMetaContext *cnmt_ctx, NcaContext *nca_ctx)
         }
     }
 
-    if (!success) LOG_MSG_ERROR("Unable to find CNMT content info entry for \"%s\" NCA! (Title ID %016lX, size 0x%lX, type 0x%02X, ID offset 0x%02X).", nca_ctx->content_id_str, \
+    if (!success) LOG_MSG_ERROR("Unable to find CNMT content info entry for \"%s\" NCA! (title ID %016lX, size 0x%lX, type 0x%02X, ID offset 0x%02X).", nca_ctx->content_id_str, \
                           cnmt_ctx->packaged_header->title_id, nca_ctx->content_size, nca_ctx->content_type, nca_ctx->id_offset);
 
     return success;
@@ -368,7 +420,7 @@ bool cnmtGenerateAuthoringToolXml(ContentMetaContext *cnmt_ctx, NcaContext *nca_
     u32 i, j;
     char *xml_buf = NULL;
     u64 xml_buf_size = 0;
-    char digest_str[0x41] = {0};
+    char digest_str[SHA256_HASH_STR_SIZE] = {0};
     u8 count = 0, content_meta_type = cnmt_ctx->packaged_header->content_meta_type;
     bool success = false, invalid_nca = false;
 
@@ -393,7 +445,7 @@ bool cnmtGenerateAuthoringToolXml(ContentMetaContext *cnmt_ctx, NcaContext *nca_
     /* ContentMetaAttribute. */
     for(i = 0; i < ContentMetaAttribute_Count; i++)
     {
-        if (!(cnmt_ctx->packaged_header->content_meta_attribute & (u8)BIT(i))) continue;
+        if (!(cnmt_ctx->packaged_header->content_meta_attribute & (ContentMetaAttribute)BIT(i))) continue;
         if (!CNMT_ADD_FMT_STR("  <ContentMetaAttribute>%s</ContentMetaAttribute>\n", g_cnmtAttributeStrings[i])) goto end;
         count++;
     }
@@ -414,7 +466,7 @@ bool cnmtGenerateAuthoringToolXml(ContentMetaContext *cnmt_ctx, NcaContext *nca_
             /* Non-Meta NCAs: check if their content IDs are part of the packaged content info entries from the CNMT. */
             for(j = 0; j < cnmt_ctx->packaged_header->content_count; j++)
             {
-                if (!memcmp(cnmt_ctx->packaged_content_info[j].info.content_id.c, cur_nca_ctx->content_id.c, 0x10)) break;
+                if (!memcmp(&(cnmt_ctx->packaged_content_info[j].info.content_id), &(cur_nca_ctx->content_id), sizeof(NcmContentId))) break;
             }
 
             invalid_nca = (j >= cnmt_ctx->packaged_header->content_count);

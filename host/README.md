@@ -1,6 +1,6 @@
 # nxdumptool USB Application Binary Interface (ABI) Technical Specification
 
-This Markdown document aims to explain the technical details behind the ABI used by nxdumptool to communicate with a USB host device connected to the console. As of this writing (October 22nd, 2023), the current ABI version is `1.1`.
+This Markdown document aims to explain the technical details behind the ABI used by nxdumptool to communicate with a USB host device connected to the console. As of this writing (November 11th, 2023), the current ABI version is `1.2`.
 
 In order to avoid unnecessary clutter, this document assumes the reader is already familiar with homebrew launching on the Nintendo Switch, as well as USB concepts such as device/configuration/interface/endpoint descriptors and bulk mode transfers. Shall this not be the case, a small list of helpful resources is available at the end of this document.
 
@@ -21,6 +21,8 @@ Unless stated otherwise, the reader must assume all integer fields in the docume
         * [CancelFileTransfer](#cancelfiletransfer).
         * [SendNspHeader](#sendnspheader).
         * [EndSession](#endsession).
+        * [StartExtractedFsDump](#startextractedfsdump).
+        * [EndExtractedFsDump](#endextractedfsdump).
     * [Status response](#status-response).
         * [Status codes](#status-codes).
     * [NSP transfer mode](#nsp-transfer-mode).
@@ -56,7 +58,7 @@ Right after launching nxdumptool on the target Nintendo Switch, the application 
 * Binary Object Store (BOS) descriptor:
     * Holds a USB 2.0 extension descriptor for Link Power Management (LPM) support, as well as a SuperSpeed device capability descriptor to indicate the supported speeds.
 
-Communication is performed through the bulk input and output endpoints using 5-second timeouts.
+Communication is performed through the bulk input and output endpoints using 10-second timeouts.
 
 Verifying the product string is not required at this moment -- this is because PoC builds of the rewrite branch use a different `APP_TITLE` string.
 
@@ -101,13 +103,15 @@ Certain commands yield no command block at all, leading to a command block size 
 
 #### Command IDs
 
-| Value | Name                                        | Description                                                                                                                  |
-|-------|---------------------------------------------|------------------------------------------------------------------------------------------------------------------------------|
-|   0   | [`StartSession`](#startsession)             | Starts a USB session between the target console and the USB host device.                                                     |
-|   1   | [`SendFileProperties`](#sendfileproperties) | Sends file metadata and starts a data transfer process.                                                                      |
-|   2   | [`CancelFileTransfer`](#cancelfiletransfer) | Cancels an ongoing data transfer process started by a previously issued [`SendFileProperties`](#sendfileproperties) command. |
-|   3   | [`SendNspHeader`](#sendnspheader)           | Sends the `PFS0` header from a Nintendo Submission Package (NSP). Only issued under [NSP transfer mode](#nsp-transfer-mode). |
-|   4   | [`EndSession`](#endsession)                 | Ends a previously stablished USB session between the target console and the USB host device.                                 |
+| Value | Name                                            | Description                                                                                                                           |
+|-------|-------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------|
+|   0   | [`StartSession`](#startsession)                 | Starts a USB session between the target console and the USB host device.                                                              |
+|   1   | [`SendFileProperties`](#sendfileproperties)     | Sends file metadata and starts a data transfer process.                                                                               |
+|   2   | [`CancelFileTransfer`](#cancelfiletransfer)     | Cancels an ongoing data transfer process started by a previously issued [`SendFileProperties`](#sendfileproperties) command.          |
+|   3   | [`SendNspHeader`](#sendnspheader)               | Sends the `PFS0` header from a Nintendo Submission Package (NSP). Only issued under [NSP transfer mode](#nsp-transfer-mode).          |
+|   4   | [`EndSession`](#endsession)                     | Ends a previously stablished USB session between the target console and the USB host device.                                          |
+|   5   | [`StartExtractedFsDump`](#startextractedfsdump) | Informs the host device that an extracted filesystem dump (e.g. HFS, PFS, RomFS) is about to begin.                                   |
+|   6   | [`EndExtractedFsDump`](#endextractedfsdump)     | Informs the host device that a previously started filesystem dump (via [`StartExtractedFsDump`](#startextractedfsdump)) has finished. |
 
 ### Command blocks
 
@@ -134,11 +138,11 @@ Size: 0x320 bytes.
 
 | Offset | Size  | Type          | Description                                  |
 |--------|-------|---------------|----------------------------------------------|
-|  0x000 | 0x08  | `uint64_t`    | File size.                                   |
-|  0x008 | 0x04  | `uint32_t`    | Path length.                                 |
-|  0x00C | 0x04  | `uint32_t`    | [NSP header size](#nsp-transfer-mode).       |
+|  0x000 | 0x008 | `uint64_t`    | File size.                                   |
+|  0x008 | 0x004 | `uint32_t`    | Path length.                                 |
+|  0x00C | 0x004 | `uint32_t`    | [NSP header size](#nsp-transfer-mode).       |
 |  0x010 | 0x301 | `char[769]`   | UTF-8 encoded path (NULL-terminated string). |
-|  0x311 | 0x0F  | `uint8_t[15]` | Reserved.                                    |
+|  0x311 | 0x00F | `uint8_t[15]` | Reserved.                                    |
 
 Sent right before starting a file transfer. If it succeeds, a data transfer stage will take place using 8 MiB (0x800000) chunks. If needed, the last chunk will be truncated.
 
@@ -158,7 +162,12 @@ Finally, it should be noted that it's possible for the `filesize` field to be ze
 
 Yields no command block. Expects a status response, just like the rest of the commands.
 
-This command can only be issued during the file data transfer stage from a [SendFileProperties](#sendfileproperties) command. It is used to gracefully cancel an ongoing file transfer while also keeping the USB session alive. It's up to the USB host to decide what to do with the incomplete data.
+This command can only be issued under two different scenarios:
+
+* During the file data transfer stage from a [SendFileProperties](#sendfileproperties) command.
+* In-between two different [SendFileProperties](#sendfileproperties) commands while under [NSP transfer mode](#nsp-transfer-mode).
+
+It is used to gracefully cancel an ongoing file transfer while also keeping the USB session alive. It's up to the USB host to decide what to do with the incomplete data.
 
 The easiest way to detect this command during a file transfer is by checking the length of the last received block and then parse it to see if it matches a `CancelFileTransfer` command header.
 
@@ -175,6 +184,36 @@ For more information, read the [NSP transfer mode](#nsp-transfer-mode) section o
 Yields no command block. Expects a status response, just like the rest of the commands.
 
 This command is only issued while exiting nxdumptool, as long as the target console is connected to a host device and a USB session has been successfully established.
+
+#### StartExtractedFsDump
+
+Size: 0x310 bytes.
+
+| Offset | Size  | Type          | Description                                                    |
+|--------|-------|---------------|----------------------------------------------------------------|
+|  0x000 | 0x008 | `uint64_t`    | Extracted FS dump size.                                        |
+|  0x008 | 0x301 | `char[769]`   | UTF-8 encoded extracted FS root path (NULL-terminated string). |
+|  0x309 | 0x007 | `uint8_t[7]`  | Reserved.                                                      |
+
+Sent right before dumping a Switch FS in extracted form (e.g. HFS, PFS, RomFS) using multiple [SendFileProperties](#sendfileproperties) commands in succession.
+
+The extracted FS dump size field can be used by the host device to calculate an ETA for the overall FS dump.
+
+The extracted FS root path follows the same conventions as the `path` field from a [`SendFileProperties`](#sendfileproperties) command, which means it also represents a relative path to an actual output directory used by nxdumptool, but with the difference that it actually points to the directory where all the extracted FS entries will be stored. In other words, all file paths from the extracted FS dump will begin with this string.
+
+A new `StartExtractedFsDump` command will never be issued unless an ongoing extracted FS dump is either cancelled (via [`CancelFileTransfer`](#cancelfiletransfer)) or finished (via [`EndExtractedFsDump`](#endextractedfsdump)).
+
+This command is mutually exclusive with the [NSP transfer mode](#nsp-transfer-mode) -- it'll never be issued if this mode is active.
+
+#### EndExtractedFsDump
+
+Yields no command block. Expects a status response, just like the rest of the commands.
+
+This command is only issued after all file entries from an extracted FS dump (started via [`StartExtractedFsDump`](#startextractedfsdump)) have been successfully transferred to the host device.
+
+If a [`CancelFileTransfer`](#cancelfiletransfer) command is issued before finishing an extracted FS dump, this command shall not be expected.
+
+This command is mutually exclusive with the [NSP transfer mode](#nsp-transfer-mode) -- it'll never be issued if this mode is active.
 
 ### Status response
 
@@ -224,7 +263,7 @@ This is because the `PFS0` header from NSPs holds the filenames for all file ent
 
 NCA filenames represent the first half of the NCA SHA-256 checksum, in lowercase. This fact alone makes it impossible to send a NSP header right from the beginning -- SHA-256 checksums are calculated by nxdumptool while dumping each NCA.
 
-#### Zero Length Termination (ZLT)
+### Zero Length Termination (ZLT)
 
 As per USB bulk transfer specification, when a USB host/device receives a data packet smaller than the endpoint max packet size, it shall consider the transfer is complete and no more data packets are left. This is called a transaction completion mechanism.
 

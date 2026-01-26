@@ -1,7 +1,7 @@
 /*
  * program_info.c
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -21,9 +21,9 @@
 
 #include <mbedtls/base64.h>
 
-#include "nxdt_utils.h"
-#include "program_info.h"
-#include "elf_symbol.h"
+#include <core/nxdt_utils.h>
+#include <core/program_info.h>
+#include <core/elf_symbol.h>
 
 /* Helper macros. */
 

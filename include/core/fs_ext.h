@@ -1,7 +1,7 @@
 /*
  * fs_ext.h
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -29,10 +29,11 @@ extern "C" {
 #endif
 
 #define GAMECARD_CERT_MAGIC 0x43455254  /* "CERT". */
+#define GAMECARD_T2CC_MAGIC 0x54324343  /* "T2CC". */
 
-/// Located at offset 0x7000 in the gamecard image.
+/// Located at offset 0x7000 in T1 gamecard images.
 typedef struct {
-    u8 signature[0x100];        ///< RSA-2048-PSS with SHA-256 signature over the rest of the data.
+    u8 signature[0x100];        ///< RSA-2048-PKCS#1 v1.5 with SHA-256 signature over the data from 0x100 to 0x200. Verified with Ca9Modulus.
     u32 magic;                  ///< "CERT".
     u32 version;
     u8 kek_index;
@@ -41,38 +42,122 @@ typedef struct {
     u8 iv[0x10];
     u8 hw_key[0x10];            ///< Encrypted.
     u8 data[0xC0];              ///< Encrypted.
-} FsGameCardCertificate;
+    u8 padding[0x200];          ///< Usually filled with 0xFF.
+} FsGameCardT1Certificate;
 
-NXDT_ASSERT(FsGameCardCertificate, 0x200);
+NXDT_ASSERT(FsGameCardT1Certificate, 0x400);
+
+/// Located at offset 0x7000 in T2 gamecard images.
+/// Somewhat resembles the format followed by GameCardHeader2Certificate.
+typedef struct {
+    u8 signature[0x100];        ///< RSA-2048-PKCS#1 v1.5 with SHA-256 signature over the rest of the data. TODO: add verification modulus name.
+    u32 magic;                  ///< "T2CC".
+    u32 version;                ///< Always set to 2.
+    u8 unknown[0x28];
+    u8 public_key[0x100];
+    u8 public_exponent[0x3];
+    u8 reserved_2[0x1CD];
+} FsGameCardT2Certificate;
+
+NXDT_ASSERT(FsGameCardT2Certificate, 0x400);
 
 typedef struct {
-    u8 maker_code;      ///< Usually 0xC2 (Macronix).
-    u8 memory_capacity; ///< Matches GameCardRomSize.
-    u8 reserved;        ///< Known values: 0x06, 0x09, 0x0A.
-    u8 memory_type;     ///< Usually 0x21.
+    union {
+        FsGameCardT1Certificate t1_cert;
+        FsGameCardT2Certificate t2_cert;
+    };
+} FsGameCardCertificate;
+
+NXDT_ASSERT(FsGameCardCertificate, 0x400);
+
+typedef enum : u8 {
+    FsCardId1MakerCode_MegaChips = 0xC2,    ///< Macronix.
+    FsCardId1MakerCode_Lapis     = 0xAE,
+    FsCardId1MakerCode_Unknown   = 0x36     ///< Seen in TLoZ:TotK, SMBW and other modern releases.
+} FsCardId1MakerCode;
+
+typedef enum : u8 {
+    FsCardId1MemoryType_None       = 0,
+    FsCardId1MemoryType_CardModeT1 = BIT(0),
+    FsCardId1MemoryType_CardModeT2 = BIT(1),
+    FsCardId1MemoryType_Unknown1   = BIT(2),    ///< Related to CardMode?
+    FsCardId1MemoryType_IsNand     = BIT(3),    ///< 0: Rom, 1: Nand.
+    FsCardId1MemoryType_Unknown2   = BIT(4),    ///< Related to Nand memory type?
+    FsCardId1MemoryType_IsLate     = BIT(5),    ///< 0: Fast, 1: Late.
+    FsCardId1MemoryType_Unknown3   = BIT(6),
+    FsCardId1MemoryType_Unknown4   = BIT(7),
+    FsCardId1MemoryType_Count      = 8,         ///< Total values supported by this enum.
+
+    ///< Values defined in Atmosphère source code.
+    FsCardId1MemoryType_T1RomFast  = FsCardId1MemoryType_CardModeT1,
+    FsCardId1MemoryType_T2RomFast  = FsCardId1MemoryType_CardModeT2,
+    FsCardId1MemoryType_T1NandFast = (FsCardId1MemoryType_IsNand | FsCardId1MemoryType_CardModeT1),
+    FsCardId1MemoryType_T2NandFast = (FsCardId1MemoryType_IsNand | FsCardId1MemoryType_CardModeT2),
+    FsCardId1MemoryType_T1RomLate  = (FsCardId1MemoryType_IsLate | FsCardId1MemoryType_CardModeT1),
+    FsCardId1MemoryType_T2RomLate  = (FsCardId1MemoryType_IsLate | FsCardId1MemoryType_CardModeT2),
+    FsCardId1MemoryType_T1NandLate = (FsCardId1MemoryType_IsLate | FsCardId1MemoryType_IsNand | FsCardId1MemoryType_CardModeT1),
+    FsCardId1MemoryType_T2NandLate = (FsCardId1MemoryType_IsLate | FsCardId1MemoryType_IsNand | FsCardId1MemoryType_CardModeT2)
+} FsCardId1MemoryType;
+
+typedef struct {
+    union {
+        u32 value;
+        struct {
+            FsCardId1MakerCode maker_code;
+            u8 memory_capacity;                 ///< Matches GameCardRomSize.
+            u8 reserved;                        ///< Known values: 0x00, 0x01, 0x02, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0C, 0x0D, 0x0E, 0x80.
+            FsCardId1MemoryType memory_type;
+        };
+    };
 } FsCardId1;
 
 NXDT_ASSERT(FsCardId1, 0x4);
 
+typedef enum : u8 {
+    FsCardId2CardSecurityNumber_Number0 = 0,
+    FsCardId2CardSecurityNumber_Number1 = 1,
+    FsCardId2CardSecurityNumber_Number2 = 2,
+    FsCardId2CardSecurityNumber_Number3 = 3,
+    FsCardId2CardSecurityNumber_Number4 = 4,
+    FsCardId2CardSecurityNumber_Count   = 5     ///< Total values supported by this enum.
+} FsCardId2CardSecurityNumber;
+
+typedef enum : u8 {
+    FsCardId2CardType_Rom            = 0,
+    FsCardId2CardType_WritableDevT1  = 1,
+    FsCardId2CardType_WritableProdT1 = 2,
+    FsCardId2CardType_WritableDevT2  = 3,
+    FsCardId2CardType_WritableProdT2 = 4,
+    FsCardId2CardType_Count          = 5    ///< Total values supported by this enum.
+} FsCardId2CardType;
+
 typedef struct {
-    u8 card_security_number;    ///< Usually 0x02.
-    u8 card_type;               ///< Usually 0x00.
-    u8 reserved[0x2];           ///< Usually filled with zeroes.
+    union {
+        u32 value;
+        struct {
+            FsCardId2CardSecurityNumber card_security_number;
+            FsCardId2CardType card_type;
+            u8 reserved[0x2];                                   ///< Usually filled with zeroes.
+        };
+    };
 } FsCardId2;
 
 NXDT_ASSERT(FsCardId2, 0x4);
 
 typedef struct {
-    u8 reserved[0x4];   ///< Usually filled with zeroes.
+    union {
+        u32 value;
+        u8 reserved[0x4];   ///< Usually filled with zeroes.
+    };
 } FsCardId3;
 
 NXDT_ASSERT(FsCardId3, 0x4);
 
 /// Returned by fsDeviceOperatorGetGameCardIdSet.
 typedef struct {
-    FsCardId1 id1;
-    FsCardId2 id2;
-    FsCardId3 id3;
+    FsCardId1 id1;  ///< Specifies maker code, memory capacity and memory type.
+    FsCardId2 id2;  ///< Specifies card security number and card type.
+    FsCardId3 id3;  ///< Always zero (so far).
 } FsGameCardIdSet;
 
 NXDT_ASSERT(FsGameCardIdSet, 0xC);
@@ -83,8 +168,6 @@ Result fsOpenGameCardDetectionEventNotifier(FsEventNotifier *out);
 
 /// IDeviceOperator.
 Result fsDeviceOperatorUpdatePartitionInfo(FsDeviceOperator *d, const FsGameCardHandle *handle, u32 *out_title_version, u64 *out_title_id);
-Result fsDeviceOperatorGetGameCardDeviceCertificate(FsDeviceOperator *d, const FsGameCardHandle *handle, FsGameCardCertificate *out);
-Result fsDeviceOperatorGetGameCardIdSet(FsDeviceOperator *d, FsGameCardIdSet *out);
 
 #ifdef __cplusplus
 }

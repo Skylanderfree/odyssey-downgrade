@@ -1,7 +1,7 @@
 /*
  * main.cpp
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2024, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -19,9 +19,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include <nxdt_utils.h>
-#include <scope_guard.hpp>
-#include <root_view.hpp>
+#include <core/nxdt_utils.h>
+#include <utils/scope_guard.hpp>
+#include <views/root_view.hpp>
 
 namespace i18n = brls::i18n;    /* For getStr(). */
 using namespace i18n::literals; /* For _i18n. */
@@ -30,11 +30,14 @@ bool g_borealisInitialized = false;
 
 int main(int argc, char *argv[])
 {
+    NX_IGNORE_ARG(argc);
+    NX_IGNORE_ARG(argv);
+
     /* Set scope guard to clean up resources at exit. */
     ON_SCOPE_EXIT { utilsCloseResources(); };
 
     /* Initialize application resources. */
-    if (!utilsInitializeResources(argc, (const char**)argv)) return EXIT_FAILURE;
+    if (!utilsInitializeResources()) return EXIT_FAILURE;
 
     /* Load Borealis translation files. */
     brls::i18n::loadTranslations();
@@ -67,7 +70,7 @@ int main(int argc, char *argv[])
     } catch (...) {
         std::exception_ptr p = std::current_exception();
         LOG_MSG_ERROR("Exception caught! (%s).", p ? p.__cxa_exception_type()->name() : "unknown");
-        brls::Application::crash(i18n::getStr("generic/exception_caught"_i18n, p ? p.__cxa_exception_type()->name() : "generic/unknown_exception"_i18n));
+        brls::Application::crash(i18n::getStr("generic/exception_caught", p ? p.__cxa_exception_type()->name() : "generic/unknown_exception"_i18n));
         while(brls::Application::mainLoop());
     }
 
