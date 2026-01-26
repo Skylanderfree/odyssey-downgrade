@@ -19,13 +19,13 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
-#include "bktr.h"
-#include "gamecard.h"
-#include "usb.h"
-#include "title.h"
-#include "pfs.h"
-#include "romfs.h"
+#include <core/nxdt_utils.h>
+#include <core/bktr.h>
+#include <core/gamecard.h>
+#include <core/usb.h>
+#include <core/title.h>
+#include <core/pfs.h>
+#include <core/romfs.h>
 
 #define RESET   "\033[0m"
 #define BLACK   "\033[30m"      /* Black */
@@ -326,7 +326,7 @@ void do_add_downgrade() {
         goto cleanup;
     }
 
-    consolePrint("selected title:\n%s (%016lX)\n\n", app_metadata[odysseyIdx]->lang_entry.name, app_metadata[odysseyIdx]->title_id + program_id_offset);
+    consolePrint("selected title:\n%s (%016lX)\n\n", app_metadata[odysseyIdx]->name, app_metadata[odysseyIdx]->title_id + program_id_offset);
 
     if (!ncaInitializeContext(
       base_nca_ctx,
@@ -583,7 +583,7 @@ int main(int argc, char *argv[])
 {
     int ret = 0;
 
-    if (!utilsInitializeResources(argc, (const char**)argv))
+    if (!utilsInitializeResources())
     {
         ret = -1;
         goto out;

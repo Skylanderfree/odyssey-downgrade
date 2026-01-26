@@ -6,6 +6,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")"
 
 filename="odyssey_downgrade"
 
+export ICON="romfs/icon/Odyssey\ Downgrade.jpg"
 export APP_TITLE="Odyssey Downgrade"
 export APP_AUTHOR="Shadów"
 

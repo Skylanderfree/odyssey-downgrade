@@ -76,7 +76,7 @@ TARGET				:=	${BUILD_TYPE}
 BUILD				:=	build
 SOURCES				:=	source source/core source/core/devoptab source/core/devoptab/fatfs source/tasks source/utils source/views
 DATA				:=	data
-ICON				:=	romfs/icon/${APP_TITLE}.jpg
+ICON				?=	romfs/icon/${APP_TITLE}.jpg
 INCLUDES			:=	include
 ROMFS       		:=	romfs
 
