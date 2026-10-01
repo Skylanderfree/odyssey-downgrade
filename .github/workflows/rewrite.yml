@@ -3,7 +3,6 @@ name: Build nxdumptool-rewrite binary
 on:
   push:
     branches: [ rewrite ]
-
     paths:
       - '.github/workflows/rewrite.yml'
       - 'code_templates/**'
@@ -17,96 +16,108 @@ on:
   # Allows you to run this workflow manually from the Actions tab.
   workflow_dispatch:
 
+env:
+  DEVKITPRO: "/opt/devkitpro"
+  DEVKITARM: "/opt/devkitpro/devkitARM"
+  DEVKITPPC: "/opt/devkitpro/devkitPPC"
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
+    # Skip build with [ci skip] in commit
+    if: "! contains(github.event.head_commit.message, '[ci skip]')"
     container:
       image: devkitpro/devkita64
-
-    defaults:
-      run:
-        shell: bash
-
     steps:
-      - name: Set environment variables
+      # Workaround: avoid requesting data from devkitPro servers because they ban most CI/CD scripts.
+      - name: Update packages
         run: |
-          echo "nxdt_commit=${GITHUB_SHA::7}" >> $GITHUB_ENV
+          sudo -n apt-get update
+          sudo -n apt-get upgrade -y patch autoconf automake tar bzip2 diffutils pkgconf fakeroot git file zstd
+          sudo -n dkp-pacman --noconfirm -U \
+            "https://wii.leseratte10.de/devkitPro/other-stuff/dkp-toolchain-vars-1.0.3-2-any.pkg.tar.zst" \
+            "https://wii.leseratte10.de/devkitPro/cmake/switch-cmake-1.5.0-1-any.pkg.tar.xz"
+        #    "https://wii.leseratte10.de/devkitPro/switch/switch-libjson-c-0.16-1-any.pkg.tar.xz" \
+        #    "https://wii.leseratte10.de/devkitPro/switch/switch-libpng-1.6.39-2-any.pkg.tar.zst" \
+        #    "https://wii.leseratte10.de/devkitPro/switch/switch-zlib-1.2.13-1-any.pkg.tar.xz"
 
-      - name: Clone nxdumptool repository
-        uses: actions/checkout@v4
-        with:
-          path: nxdumptool
-          submodules: recursive
+      - name: Silence all git safe directory warnings
+        run: git config --system --add safe.directory '*'
 
-      - name: Build nxdumptool-rewrite PoC binary
-        id: build
-        continue-on-error: true
-        working-directory: nxdumptool
+      # Workaround: manually use git instead of actions/checkout to parse repository properties (e.g. branch name, commit hash, etc.) on our own.
+      - name: Checkout latest nxdumptool-rewrite commit
         run: |
-          chmod +x ./build.sh
-          ./build.sh --noconfirm
+          cd "$GITHUB_WORKSPACE"
+          git clone --branch rewrite --recurse-submodules https://github.com/DarkMatterCore/nxdumptool.git
 
-      - name: Clone libnx repository
-        if: ${{ steps.build.outcome == 'failure' }}
-        uses: actions/checkout@v4
-        with:
-          repository: switchbrew/libnx
-          path: libnx
-          submodules: recursive
+      - name: Checkout latest libnx commit
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git clone --recurse-submodules https://github.com/switchbrew/libnx.git
 
-      - name: Install latest libnx commit and retry build
-        if: ${{ steps.build.outcome == 'failure' }}
+      - name: Set workspace permissions
+        run: chmod 777 -R "$GITHUB_WORKSPACE"
+
+      - name: Build and install libnx
         run: |
           cd "$GITHUB_WORKSPACE/libnx"
-          make install -j8
-          cd "$GITHUB_WORKSPACE/nxdumptool"
-          ./build.sh --noconfirm
+          make install -j$(nproc)
 
-      - name: Build nxdumptool-rewrite UI binary
-        working-directory: nxdumptool
+      # Workaround: dkp-makepkg's "-i" option fails because it tries to run pacman as root on its own using sudo, and a password must be interactively provided.
+      # We can't just provide root access to dkp-makepkg because it refuses to work at all if we do so.
+      # As much as I'd like to run "make fs-libs" and call it a day, it's just not possible.
+      - name: Build libusbhsfs dependencies
         run: |
-          make -j8
+          cd "$GITHUB_WORKSPACE/nxdumptool/libs/libusbhsfs"
+          cd libntfs-3g; su -s /bin/bash nobody -c "dkp-makepkg -c -C -f" > /dev/null; sudo -n dkp-pacman -U --needed --noconfirm *.pkg.tar.* > /dev/null; cd ..
+          cd liblwext4; su -s /bin/bash nobody -c "dkp-makepkg -c -C -f" > /dev/null; sudo -n dkp-pacman -U --needed --noconfirm *.pkg.tar.* > /dev/null; cd ..
 
-      - name: Upload nxdumptool-rewrite PoC NRO artifact
-        uses: actions/upload-artifact@v4
+      - name: Build nxdumptool-rewrite PoC binary
+        run: |
+          cd "$GITHUB_WORKSPACE/nxdumptool"
+          echo "nxdt_commit=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          ./build.sh
+
+      #- name: Build nxdumptool-rewrite GUI binary
+      #  run: |
+      #    cd "$GITHUB_WORKSPACE/nxdumptool"
+      #    make -j$(nproc)
+
+      - uses: actions/upload-artifact@v3
         with:
           name: nxdt_rw_poc-${{ env.nxdt_commit }}.nro
           path: nxdumptool/code_templates/tmp/nxdt_rw_poc.nro
           if-no-files-found: error
 
-      - name: Upload nxdumptool-rewrite PoC ELF artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v3
         with:
           name: nxdt_rw_poc-${{ env.nxdt_commit }}.elf
           path: nxdumptool/code_templates/tmp/nxdt_rw_poc.elf
           if-no-files-found: error
 
-      - name: Upload nxdumptool-rewrite UI NRO artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: nxdumptool-rewrite-${{ env.nxdt_commit }}-WIP_UI.nro
-          path: nxdumptool/nxdumptool.nro
-          if-no-files-found: error
+      #- uses: actions/upload-artifact@v3
+      #  with:
+      #    name: nxdumptool-rewrite-${{ env.nxdt_commit }}-WIP_UI.nro
+      #    path: nxdumptool/nxdumptool.nro
+      #    if-no-files-found: error
 
-      - name: Upload nxdumptool-rewrite UI ELF artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: nxdumptool-rewrite-${{ env.nxdt_commit }}-WIP_UI.elf
-          path: nxdumptool/nxdumptool.elf
-          if-no-files-found: error
+      #- uses: actions/upload-artifact@v3
+      #  with:
+      #    name: nxdumptool-rewrite-${{ env.nxdt_commit }}-WIP_UI.elf
+      #    path: nxdumptool/nxdumptool.elf
+      #    if-no-files-found: error
 
-      - name: Upload nxdumptool-rewrite PoC artifacts to pre-release
+      - name: Upload artifact to prerelease
         uses: ncipollo/release-action@v1
         with:
-          # Only update attachments on "rewrite-prerelease" tag.
+          # only update on prerelease
           prerelease: True
           tag: "rewrite-prerelease"
           updateOnlyUnreleased: True
-          # Remove old artifacts and replace with new ones.
-          removeArtifacts: False
+          # remove old artifacts & replace with new ones
+          removeArtifacts: True
           replacesArtifacts: True
-          # Update preferences.
+          # update preference
           allowUpdates: True
           omitBody: True
           omitBodyDuringUpdate: True

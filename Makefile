@@ -43,49 +43,38 @@ include $(DEVKITPRO)/libnx/switch_rules
 
 ROOTDIR				?=	$(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))
 
-GIT_BRANCH			:=	$(strip $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null))
-GIT_COMMIT			:=	$(strip $(shell git rev-parse --short HEAD 2>/dev/null))
+GIT_BRANCH			:=	$(shell git rev-parse --abbrev-ref HEAD)
+GIT_COMMIT			:=	$(shell git rev-parse --short HEAD)
 GIT_REV				:=	${GIT_BRANCH}-${GIT_COMMIT}
 
 ifneq (,$(strip $(shell git status --porcelain 2>/dev/null)))
 GIT_REV				:=	$(GIT_REV)-dirty
 endif
 
-ifeq (,$(GIT_BRANCH))
-    $(error GIT_BRANCH is empty)
-endif
-
-ifeq (,$(GIT_COMMIT))
-    $(error GIT_COMMIT is empty)
-endif
-
 VERSION_MAJOR		:=	2
 VERSION_MINOR		:=	0
 VERSION_MICRO		:=	0
 
-APP_TITLE			:=	nxdumptool
-APP_AUTHOR			:=	DarkMatterCore
-APP_VERSION			:=	${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_MICRO}
+APP_TITLE			?=	nxdumptool
+APP_AUTHOR			?=	DarkMatterCore
+APP_VERSION			?=	${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_MICRO}
 
 # TODO: remove this after the PoC builds are no longer needed.
-ifneq ($(origin BUILD_TYPE),undefined)
-APP_TITLE			:=	${BUILD_TYPE}
-endif
+BUILD_TYPE			?=	nxdumptool
 
 BUILD_TIMESTAMP		:=	$(strip $(shell date --utc '+%Y-%m-%d %T UTC'))
 
-TARGET				:=	${APP_TITLE}
+TARGET				:=	${BUILD_TYPE}
 BUILD				:=	build
-SOURCES				:=	source source/core source/core/devoptab source/core/devoptab/fatfs source/tasks source/utils source/views
+SOURCES				:=	source source/core source/fatfs
 DATA				:=	data
-ICON				:=	romfs/icon/${APP_TITLE}.jpg
-INCLUDES			:=	include
+ICON				:=	romfs/icon/${BUILD_TYPE}.jpg
+INCLUDES			:=	include include/core include/fatfs
 ROMFS       		:=	romfs
 
 BOREALIS_PATH		:=	libs/borealis
 BOREALIS_RESOURCES	:=	romfs:/
 
-NXTC_PATH			:=	$(ROOTDIR)/libs/libnxtc
 USBHSFS_PATH		:=	$(ROOTDIR)/libs/libusbhsfs
 
 #---------------------------------------------------------------------------------
@@ -93,26 +82,25 @@ USBHSFS_PATH		:=	$(ROOTDIR)/libs/libusbhsfs
 #---------------------------------------------------------------------------------
 ARCH		:=	-march=armv8-a+crc+crypto -mtune=cortex-a57 -mtp=soft -fPIE
 
-CFLAGS		:=	-g -Wall -Werror -O2 -flto -ffunction-sections $(ARCH) $(DEFINES) $(INCLUDE) -D__SWITCH__
+CFLAGS		:=	-g -Wall -Werror -O2 -ffunction-sections $(ARCH) $(DEFINES) $(INCLUDE) -D__SWITCH__
 CFLAGS		+=	-DVERSION_MAJOR=${VERSION_MAJOR} -DVERSION_MINOR=${VERSION_MINOR} -DVERSION_MICRO=${VERSION_MICRO}
-CFLAGS		+=	-DAPP_TITLE="\"${APP_TITLE}\"" -DAPP_AUTHOR="\"${APP_AUTHOR}\"" -DAPP_VERSION="\"${APP_VERSION}\""
-CFLAGS		+=	-DGIT_BRANCH="\"${GIT_BRANCH}\"" -DGIT_COMMIT="\"${GIT_COMMIT}\"" -DGIT_REV="\"${GIT_REV}\""
+CFLAGS		+=	-DAPP_TITLE="\"${APP_TITLE}\"" -DAPP_AUTHOR=\"${APP_AUTHOR}\" -DAPP_VERSION=\"${APP_VERSION}\"
+CFLAGS		+=	-DGIT_BRANCH=\"${GIT_BRANCH}\" -DGIT_COMMIT=\"${GIT_COMMIT}\" -DGIT_REV=\"${GIT_REV}\"
 CFLAGS		+=	-DBUILD_TIMESTAMP="\"${BUILD_TIMESTAMP}\"" -DBOREALIS_RESOURCES="\"${BOREALIS_RESOURCES}\"" -D_GNU_SOURCE
 CFLAGS		+=	-fmacro-prefix-map=$(ROOTDIR)=
 
 CXXFLAGS	:=	$(CFLAGS) -std=c++20
-CFLAGS		+=	-std=c23
 
 ASFLAGS		:=	-g $(ARCH)
 LDFLAGS		:=	-specs=$(DEVKITPRO)/libnx/switch.specs -g $(ARCH) -Wl,-Map,$(notdir $*.map)
 
-LIBS		:=	-lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lxml2 -ljson-c -lz -lnxtc -lusbhsfs -lntfs-3g -llwext4 -lnx
+LIBS		:=	-lcurl -lmbedtls -lmbedx509 -lmbedcrypto -lxml2 -ljson-c -lz -lusbhsfs -lntfs-3g -llwext4 -lnx
 
 #---------------------------------------------------------------------------------
 # list of directories containing libraries, this must be the top level containing
 # include and lib
 #---------------------------------------------------------------------------------
-LIBDIRS	:= $(PORTLIBS) $(LIBNX) $(NXTC_PATH) $(USBHSFS_PATH)
+LIBDIRS	:= $(PORTLIBS) $(LIBNX) $(USBHSFS_PATH)
 
 include $(ROOTDIR)/$(BOREALIS_PATH)/library/borealis.mk
 
@@ -208,12 +196,9 @@ endif
 #---------------------------------------------------------------------------------
 all: $(BUILD)
 
-$(BUILD): nxtc usbhsfs
+$(BUILD): usbhsfs
 	@[ -d $@ ] || mkdir -p $@
 	@MSYS2_ARG_CONV_EXCL="-D;$(MSYS2_ARG_CONV_EXCL)" $(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
-
-nxtc:
-	@$(MAKE) --no-print-directory -C $(NXTC_PATH) release
 
 usbhsfs:
 	@$(MAKE) --no-print-directory -C $(USBHSFS_PATH) BUILD_TYPE=GPL release
@@ -228,7 +213,6 @@ else
 endif
 
 clean_all: clean
-	@$(MAKE) --no-print-directory -C $(NXTC_PATH) clean
 	@$(MAKE) --no-print-directory -C $(USBHSFS_PATH) clean
 
 #---------------------------------------------------------------------------------
