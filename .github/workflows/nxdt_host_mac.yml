@@ -38,7 +38,7 @@ jobs:
           ./host/macos_make_standalone.sh
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nxdt_host_mac-${{ env.nxdt_commit }}.zip
           path: host/nxdt_host_mac.zip

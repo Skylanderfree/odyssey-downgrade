@@ -83,13 +83,13 @@ jobs:
       #    cd "$GITHUB_WORKSPACE/nxdumptool"
       #    make -j$(nproc)
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v6
         with:
           name: nxdt_rw_poc-${{ env.nxdt_commit }}.nro
           path: nxdumptool/code_templates/tmp/nxdt_rw_poc.nro
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v3
+      - uses: actions/upload-artifact@v6
         with:
           name: nxdt_rw_poc-${{ env.nxdt_commit }}.elf
           path: nxdumptool/code_templates/tmp/nxdt_rw_poc.elf

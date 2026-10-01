@@ -38,7 +38,7 @@ jobs:
         run: .\host\windows_make_standalone.bat
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: nxdt_host-${{ env.nxdt_commit }}.7z
           path: host/nxdt_host.7z
