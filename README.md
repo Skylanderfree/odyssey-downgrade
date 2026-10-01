@@ -1,3 +1,12 @@
+# This fork will try to add the following features
+- Try fixing an issue where the [Randomizer](https://github.com/DaDev123/Rando-Releases) from [Secret Dev](https://github.com/DaDev123) overwrite the downgrader making it not boot anymore
+- Adding features from [Issues](https://github.com/Istador/odyssey-downgrade/issues)
+- Updating this branch to the latest nxdumptool release :white_check_mark:
+- Fix the `consoleClear()` from [#15](https://github.com/Istador/odyssey-downgrade/issues/15)
+
+## V Everything at the bottom is unchanged V
+---------------------------------------------------------------------
+
 # nxdumptool
 <img width="200" src="romfs/icon/nxdumptool.jpg">
 Nintendo Switch Dump Tool
