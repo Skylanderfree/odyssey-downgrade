@@ -1,7 +1,7 @@
 /*
  * nxdt_log.h
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -44,9 +44,9 @@ extern "C" {
 
 /// Helper macros.
 
-#define LOG_MSG_GENERIC(level, fmt, ...)                    logWriteFormattedStringToLogFile(level, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#define LOG_MSG_BUF_GENERIC(dst, dst_size, level, fmt, ...) logWriteFormattedStringToBuffer(dst, dst_size, level, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
-#define LOG_DATA_GENERIC(data, data_size, level, fmt, ...)  logWriteBinaryDataToLogFile(data, data_size, level, __FILE__, __LINE__, __func__, fmt, ##__VA_ARGS__)
+#define LOG_MSG_GENERIC(level, fmt, ...)                    logWriteFormattedStringToLogFile(level, __FILE__, __LINE__, __PRETTY_FUNCTION__, fmt, ##__VA_ARGS__)
+#define LOG_MSG_BUF_GENERIC(dst, dst_size, level, fmt, ...) logWriteFormattedStringToBuffer(dst, dst_size, level, __FILE__, __LINE__, __PRETTY_FUNCTION__, fmt, ##__VA_ARGS__)
+#define LOG_DATA_GENERIC(data, data_size, level, fmt, ...)  logWriteBinaryDataToLogFile(data, data_size, level, __FILE__, __LINE__, __PRETTY_FUNCTION__, fmt, ##__VA_ARGS__)
 
 #if LOG_LEVEL == LOG_LEVEL_DEBUG
 #define LOG_MSG_DEBUG(fmt, ...)                             LOG_MSG_GENERIC(LOG_LEVEL_DEBUG, fmt, ##__VA_ARGS__)
@@ -110,8 +110,9 @@ void logFlushLogFile(void);
 /// Write any pending data to the logfile, flushes it and then closes it.
 void logCloseLogFile(void);
 
-/// Stores the last log message in the provided buffer.
-void logGetLastMessage(char *dst, size_t dst_size);
+/// Returns a pointer to a dynamically allocated buffer that holds the last error message string, or NULL if there's none.
+/// The allocated buffer must be freed by the caller using free().
+char *logGetLastMessage(void);
 
 /// (Un)locks the log mutex. Can be used to block other threads and prevent them from writing data to the logfile.
 /// Use with caution.
@@ -140,6 +141,15 @@ void logControlMutex(bool lock);
 #define LOG_MSG_ERROR(fmt, ...)                             do {} while(0)
 #define LOG_MSG_BUF_ERROR(dst, dst_size, fmt, ...)          do {} while(0)
 #define LOG_DATA_ERROR(data, data_size, fmt, ...)           do {} while(0)
+
+#define logWriteStringToLogFile(...)                        do {} while(0)
+#define logWriteFormattedStringToLogFile(...)               do {} while(0)
+#define logWriteFormattedStringToBuffer(...)                do {} while(0)
+#define logWriteBinaryDataToLogFile(...)                    do {} while(0)
+#define logFlushLogFile(...)                                do {} while(0)
+#define logCloseLogFile(...)                                do {} while(0)
+#define logGetLastMessage(...)                              NULL
+#define logControlMutex(...)                                do {} while(0)
 
 #endif  /* (LOG_LEVEL >= LOG_LEVEL_DEBUG) && (LOG_LEVEL < LOG_LEVEL_NONE) */
 

@@ -1,11 +1,3 @@
-# This fork will try to add the following features
-- Try fixing an issue where the [Randomizer](https://github.com/DaDev123/Rando-Releases) from [Secret Dev](https://github.com/DaDev123) overwrite the downgrader making it not boot anymore
-- Adding features from [Issues](https://github.com/Istador/odyssey-downgrade/issues)
-- Updating this branch to the latest nxdumptool release
-- Fix the `consoleClear()` from [#15](https://github.com/Istador/odyssey-downgrade/issues/15)
-
-## V Everything at the bottom is unchanged V
-
 # nxdumptool
 <img width="200" src="romfs/icon/nxdumptool.jpg">
 Nintendo Switch Dump Tool
@@ -30,7 +22,7 @@ Currently planned changes for this branch include:
 * Plaintext [gamecard CardInfo area](https://switchbrew.org/wiki/XCI#CardHeaderEncryptedData) dumps. :white_check_mark:
 * [Gamecard InitialData](https://switchbrew.org/wiki/XCI#InitialData) area dumps. :white_check_mark:
 * [Gamecard CardIdSet](https://switchbrew.org/wiki/Filesystem_services#GameCardIdSet) dumps. :white_check_mark:
-* [Gamecard Hash FS partition](https://switchbrew.org/wiki/XCI#PartitionFs) dumps (in both extracted and raw inage forms). :white_check_mark:
+* [Gamecard Hash FS partition](https://switchbrew.org/wiki/XCI#PartitionFs) dumps (in both extracted and raw image forms). :white_check_mark:
 * [Lotus ASIC firmware (LAFW) blob](https://switchbrew.org/wiki/Lotus3#User_firmware) dumping from RAM. :white_check_mark:
 * Properly detect if an inserted gamecard requires a LAFW update. :white_check_mark:
 * Nintendo Submission Package (NSP) dumps for both digital and gamecard-based titles.
@@ -43,10 +35,10 @@ Currently planned changes for this branch include:
 * Event-driven background threads to manage gamecard insertions/ejections, gamecard application metadata parsing (e.g. the game would be properly identified even if its gamecard has never been used on your console), USB ABI sessions and USB Mass Storage devices. :white_check_mark:
 * Improved support for multigame gamecards and titles with more than one Program NCA (e.g. SM3DAS). :white_check_mark:
 * Control.nacp patching while dumping NSPs (lets you patch screenshot, video, user account and HDCP restrictions). :white_check_mark:
-* Full system update dumps. :x:
-* Batch NSP dumps. :x:
-* Partition FS / Hash FS / RomFS browser using custom devoptab wrappers. :x:
-* `FsFileSystem` + `FatFs` based eMMC browser using a custom devoptab wrapper (allows copying files protected by the FS sysmodule at runtime). :x:
+* Partition FS / Hash FS / RomFS browser using custom devoptab wrappers. :white_check_mark:
+* Full system update dumps with checksum and signature verification. :white_check_mark:
+* `FsStorage` + `FatFs` based eMMC browser using a custom devoptab wrapper (allows copying files protected by the FS sysmodule at runtime). :white_check_mark:
+* Bulk queued NSP dumping. :white_check_mark:
 * New UI using a [customized borealis fork](https://github.com/DarkMatterCore/borealis/tree/nxdumptool-legacy). :warning:
 
 Legend:

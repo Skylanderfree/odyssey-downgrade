@@ -1,7 +1,7 @@
 /*
  * nxdt_json.c
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -19,8 +19,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
-#include "nxdt_json.h"
+#include <core/nxdt_utils.h>
+#include <core/nxdt_json.h>
 
 #define JSON_GETTER(functype, vartype, jsontype, ...) \
 vartype jsonGet##functype(const struct json_object *obj, const char *path) { \
@@ -46,7 +46,7 @@ struct json_object *jsonParseFromString(const char *str, size_t size)
     if (!str || !*str)
     {
         LOG_MSG_ERROR("Invalid parameters!");
-        return false;
+        return NULL;
     }
 
     /* Calculate string size if it wasn't provided. */

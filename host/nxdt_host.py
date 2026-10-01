@@ -1,9 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/env py -3
 
 """
  * nxdt_host.py
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -46,6 +46,7 @@ import time
 import struct
 import usb.core
 import usb.util
+import usb.backend.libusb1
 import warnings
 import base64
 
@@ -58,7 +59,7 @@ from tqdm import tqdm
 from argparse import ArgumentParser
 
 from io import BufferedWriter
-from typing import List, Tuple, Any, Callable, Optional
+from typing import Generator, Any, Callable
 
 # Scaling factors.
 WINDOWS_SCALING_FACTOR = 96.0
@@ -69,10 +70,10 @@ WINDOW_WIDTH  = 500
 WINDOW_HEIGHT = 470
 
 # Application version.
-APP_VERSION = '0.4'
+APP_VERSION = '0.6'
 
 # Copyright year.
-COPYRIGHT_YEAR = '2020-2023'
+COPYRIGHT_YEAR = '2020-2026'
 
 # USB VID/PID pair.
 USB_DEV_VID = 0x057E
@@ -83,7 +84,7 @@ USB_DEV_MANUFACTURER = 'DarkMatterCore'
 USB_DEV_PRODUCT = 'nxdumptool'
 
 # USB timeout (milliseconds).
-USB_TRANSFER_TIMEOUT = 5000
+USB_TRANSFER_TIMEOUT = 10000
 
 # USB transfer block size.
 USB_TRANSFER_BLOCK_SIZE = 0x800000
@@ -96,21 +97,26 @@ USB_MAGIC_WORD = b'NXDT'
 
 # Supported USB ABI version.
 USB_ABI_VERSION_MAJOR = 1
-USB_ABI_VERSION_MINOR = 1
+USB_ABI_VERSION_MINOR = 4
 
 # USB command header size.
 USB_CMD_HEADER_SIZE = 0x10
 
 # USB command IDs.
-USB_CMD_START_SESSION        = 0
-USB_CMD_SEND_FILE_PROPERTIES = 1
-USB_CMD_CANCEL_FILE_TRANSFER = 2
-USB_CMD_SEND_NSP_HEADER      = 3
-USB_CMD_END_SESSION          = 4
+USB_CMD_START_SESSION           = 0
+USB_CMD_END_SESSION             = 1
+USB_CMD_SEND_FILE_PROPERTIES    = 2
+USB_CMD_SEND_NSP_HEADER         = 3
+USB_CMD_CANCEL_FILE_TRANSFER    = 4
+USB_CMD_START_EXTRACTED_FS_DUMP = 5
+USB_CMD_START_BULK_NSP_DUMP     = 6
+USB_CMD_END_BULK_OPERATION      = 7
 
 # USB command block sizes.
-USB_CMD_BLOCK_SIZE_START_SESSION        = 0x10
-USB_CMD_BLOCK_SIZE_SEND_FILE_PROPERTIES = 0x320
+USB_CMD_BLOCK_SIZE_START_SESSION           = 0x10
+USB_CMD_BLOCK_SIZE_SEND_FILE_PROPERTIES    = 0x320
+USB_CMD_BLOCK_SIZE_START_EXTRACTED_FS_DUMP = 0x310
+USB_CMD_BLOCK_SIZE_START_BULK_NSP_DUMP     = 0x10
 
 # Max filename length (file properties).
 USB_FILE_PROPERTIES_MAX_NAME_LENGTH = 0x300
@@ -134,8 +140,8 @@ SERVER_START_MSG = f'Please connect a Nintendo Switch console running {USB_DEV_P
 SERVER_STOP_MSG = f'Exit {USB_DEV_PRODUCT} on your console or disconnect it at any time to stop the server.'
 
 # Default directory paths.
-INITIAL_DIR = os.path.abspath(os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else __file__))
-DEFAULT_DIR = (INITIAL_DIR + os.path.sep + USB_DEV_PRODUCT)
+INITIAL_DIR = os.path.dirname(os.path.abspath(os.path.expanduser(os.path.expandvars(sys.argv[0]))))
+DEFAULT_DIR = os.path.join(INITIAL_DIR, USB_DEV_PRODUCT)
 
 # Application icon (PNG).
 # Embedded to load it as the icon for all windows using PhotoImage (which doesn't support ICO files) + wm_iconphoto.
@@ -222,7 +228,7 @@ APP_ICON = b'iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAYAAABXAvmHAAAAAXNSR0IArs4c6QAAAAR
            b'43EDnoiNHI8a8FRs5HjMgCdjI8cj7+rp2MhR/Z3p7b5gyzRyjN0ei80cwP+bQrjkWSh1LgAAAABJRU5ErkJggg=='
 
 # Taskbar Type Library (TLB). Used under Windows 7 or greater.
-TASKBAR_LIB_PATH = (INITIAL_DIR + os.path.sep + 'TaskbarLib.tlb')
+TASKBAR_LIB_PATH = os.path.join(INITIAL_DIR, 'TaskbarLib.tlb')
 
 TASKBAR_LIB = b'TVNGVAIAAQAAAAAACQQAAAAAAABBAAAAAQAAAAAAAAAOAAAA/////wAAAAAAAAAATgAAADMDAAAAAAAA/////xgAAAAgAAAAgAAAAP////8AAAAAAAAAAGQAAADIAAAA' + \
               b'LAEAAJABAAD0AQAAWAIAALwCAAAgAwAAhAMAAOgDAABMBAAAsAQAABQFAAB8AQAAeAUAAP////8PAAAA/////wAAAAD/////DwAAAP////8AAAAA/////w8AAABMCAAA' + \
@@ -300,7 +306,7 @@ TASKBAR_LIB = b'TVNGVAIAAQAAAAAACQQAAAAAAABBAAAAAQAAAAAAAAAOAAAA/////wAAAAAAAAAA
 # Global variables used throughout the code.
 g_cliMode: bool = False
 g_outputDir: str = ''
-g_logLevelIntVar: Optional[tk.IntVar] = None
+g_logLevelIntVar: tk.IntVar | None = None
 
 g_osType: str = ''
 g_osVersion: str = ''
@@ -309,18 +315,18 @@ g_isWindows: bool = False
 g_isWindowsVista: bool = False
 g_isWindows7: bool = False
 
-g_tkRoot: Optional[tk.Tk] = None
-g_tkCanvas: Optional[tk.Canvas] = None
-g_tkDirText: Optional[tk.Text] = None
-g_tkChooseDirButton: Optional[tk.Button] = None
-g_tkServerButton: Optional[tk.Button] = None
-g_tkTipMessage: Any = None
-g_tkScrolledTextLog: Optional[scrolledtext.ScrolledText] = None
-g_tkVerboseCheckbox: Optional[tk.Checkbutton] = None
+g_tkRoot: tk.Tk | None = None
+g_tkCanvas: tk.Canvas | None = None
+g_tkDirText: tk.Text | None = None
+g_tkChooseDirButton: tk.Button | None = None
+g_tkServerButton: tk.Button | None = None
+g_tkTipMessage: int = 0
+g_tkScrolledTextLog: scrolledtext.ScrolledText | None = None
+g_tkVerboseCheckbox: tk.Checkbutton | None = None
 
-g_logger: Optional[logging.Logger] = None
+g_logger: logging.Logger | None = None
 
-g_stopEvent: Optional[threading.Event] = None
+g_stopEvent: threading.Event | None = None
 
 g_tlb: Any = None
 g_taskbar: Any = None
@@ -328,6 +334,7 @@ g_taskbar: Any = None
 g_usbEpIn: Any = None
 g_usbEpOut: Any = None
 g_usbEpMaxPacketSize: int = 0
+g_usbVersion: str = ''
 
 g_nxdtVersionMajor: int = 0
 g_nxdtVersionMinor: int = 0
@@ -340,12 +347,12 @@ g_nspTransferMode: bool = False
 g_nspSize: int = 0
 g_nspHeaderSize: int = 0
 g_nspRemainingSize: int = 0
-g_nspFile: Optional[BufferedWriter] = None
+g_nspFile: BufferedWriter | None = None
 g_nspFilePath: str = ''
 
 # Reference: https://beenje.github.io/blog/posts/logging-to-a-tkinter-scrolledtext-widget.
 class LogQueueHandler(logging.Handler):
-    def __init__(self, log_queue: queue.Queue):
+    def __init__(self, log_queue: queue.Queue) -> None:
         super().__init__()
         self.log_queue = log_queue
 
@@ -358,8 +365,8 @@ class LogQueueHandler(logging.Handler):
 
 # Reference: https://beenje.github.io/blog/posts/logging-to-a-tkinter-scrolledtext-widget.
 class LogConsole:
-    def __init__(self, scrolled_text: Optional[scrolledtext.ScrolledText] = None):
-        #assert g_logger is not None
+    def __init__(self, scrolled_text: scrolledtext.ScrolledText | None = None) -> None:
+        assert g_logger is not None
 
         self.scrolled_text = scrolled_text
         self.frame = (self.scrolled_text.winfo_toplevel() if self.scrolled_text else None)
@@ -403,26 +410,27 @@ class LogConsole:
 class ProgressBarWindow:
     global g_tlb, g_taskbar
 
-    def __init__(self, bar_format: str = '', tk_parent: Any = None, window_title: str = '', window_resize: bool = False, window_protocol: Optional[Callable] = None):
+    def __init__(self, bar_format: str = '', tk_parent: Any = None, window_title: str = '', window_resize: bool = False, window_protocol: Callable | None = None) -> None:
         self.n: int = 0
         self.total: int = 0
-        self.divider: float = 1.0
+        self.divisor: float = 1.0
         self.total_div: float = 0
         self.prefix: str = ''
         self.unit: str = 'B'
         self.bar_format = bar_format
         self.start_time: float = 0
-        self.elapsed_time: float = 0
+        self.prev_iter_time: float = 0
+        self.prev_n: int = 0
         self.hwnd: int = 0
 
         self.tk_parent = tk_parent
         self.tk_window = (tk.Toplevel(self.tk_parent) if self.tk_parent else None)
         self.withdrawn = False
-        self.tk_text_var: Optional[tk.StringVar] = None
-        self.tk_n_var: Optional[tk.DoubleVar] = None
-        self.tk_pbar: Optional[ttk.Progressbar] = None
+        self.tk_text_var: tk.StringVar | None = None
+        self.tk_n_var: tk.DoubleVar | None = None
+        self.tk_pbar: ttk.Progressbar | None = None
 
-        self.pbar: Optional[tqdm] = None
+        self.pbar: tqdm | None = None
 
         if self.tk_window:
             self.tk_window.withdraw()
@@ -448,26 +456,30 @@ class ProgressBarWindow:
             self.tk_pbar.configure(maximum=100, mode='indeterminate')
             self.tk_pbar.pack()
 
-    def __del__(self):
-        if self.tk_parent:
+    def __del__(self) -> None:
+        if self.tk_window:
             self.tk_parent.after(0, self.tk_window.destroy)
 
-    def start(self, total: int, n: int = 0, divider: int = 1, prefix: str = '', unit: str = 'B') -> None:
-        if (total <= 0) or (n < 0) or (divider < 1):
+    def start(self, total: int, n: int = 0, prefix: str = '') -> None:
+        if (total <= 0) or (n < 0):
             raise Exception('Invalid arguments!')
 
         self.n = n
         self.total = total
-        self.divider = float(divider)
-        self.total_div = (float(self.total) / self.divider)
         self.prefix = prefix
-        self.unit = unit
+
+        # Get progress bar unit and unit divisor. These will be used to display and calculate size values using a specific size unit (B, KiB, MiB, GiB).
+        unit_and_divisor = utilsGetSizeUnitAndDivisor(self.total)
+        self.unit = unit_and_divisor[0]
+        self.divisor = float(unit_and_divisor[1])
+
+        self.total_div = (float(self.total) / self.divisor)
 
         if self.tk_pbar:
             self.tk_pbar.configure(maximum=self.total_div, mode='determinate')
             self.start_time = time.time()
         else:
-            n_div = (float(self.n) / self.divider)
+            n_div = (float(self.n) / self.divisor)
             self.pbar = tqdm(initial=n_div, total=self.total_div, unit=self.unit, dynamic_ncols=True, desc=self.prefix, bar_format=self.bar_format)
 
     def update(self, n: int) -> None:
@@ -475,14 +487,19 @@ class ProgressBarWindow:
         if cur_n > self.total:
             return
 
+        cur_time = time.time()
+        cur_n_div = (float(cur_n) / self.divisor)
+
+        msg = self._format_speed(cur_time, cur_n)
+        if not msg:
+            self.n = cur_n
+            return
+
         if self.tk_window:
-            #assert self.tk_text_var is not None
-            #assert self.tk_n_var is not None
+            assert self.tk_text_var is not None
+            assert self.tk_n_var is not None
 
-            cur_n_div = (float(cur_n) / self.divider)
-            self.elapsed_time = (time.time() - self.start_time)
-
-            msg = tqdm.format_meter(n=cur_n_div, total=self.total_div, elapsed=self.elapsed_time, prefix=self.prefix, unit=self.unit, bar_format=self.bar_format)
+            msg = tqdm.format_meter(n=cur_n_div, total=self.total_div, elapsed=(cur_time - self.start_time), prefix=self.prefix, unit=self.unit, bar_format=msg)
 
             self.tk_text_var.set(msg)
             self.tk_n_var.set(cur_n_div)
@@ -502,24 +519,47 @@ class ProgressBarWindow:
             if g_taskbar:
                 g_taskbar.SetProgressValue(self.hwnd, cur_n, self.total)
         else:
-            #assert self.pbar is not None
-            n_div = (float(n) / self.divider)
-            self.pbar.update(n_div)
+            assert self.pbar is not None
+
+            self.pbar.bar_format = msg
+            self.pbar.n = (float(self.n) / self.divisor)
+            self.pbar.update(float(n) / self.divisor)
 
         self.n = cur_n
+
+    def _format_speed(self, cur_time: float, cur_n: int) -> str:
+        # Short-circuit: return immediately if our unit is set to MiB. We'll let tqdm do its thing.
+        if self.unit == 'MiB':
+            return self.bar_format.replace('__custom_rate_fmt__', '{rate_fmt}')
+
+        # I absolutely hate to roll out my own speed calculation for the UI, but tqdm offers no way to use different units for the progress/total/rate values.
+        # Please forgive me.
+        last_iter_time = (cur_time - self.prev_iter_time)
+        if (self.prev_n > 0) and (last_iter_time != cur_time) and (last_iter_time < 1.0) and (cur_n < self.total):
+            return ''
+
+        rate = (float(cur_n - self.prev_n) / 1048576.0)
+        if last_iter_time != cur_time:
+            rate /= last_iter_time
+
+        self.prev_n = cur_n
+        self.prev_iter_time = cur_time
+
+        return self.bar_format.replace('__custom_rate_fmt__', f'{rate:.2f} MiB/s')
 
     def end(self) -> None:
         self.n = 0
         self.total = 0
-        self.divider = 1
+        self.divisor = 1
         self.total_div = 0
         self.prefix = ''
         self.unit = 'B'
         self.start_time = 0
-        self.elapsed_time = 0
+        self.prev_iter_time = 0
+        self.prev_n = 0
 
         if self.tk_window:
-            #assert self.tk_pbar is not None
+            assert self.tk_pbar is not None
 
             if g_taskbar:
                 g_taskbar.SetProgressState(self.hwnd, g_tlb.TBPF_NOPROGRESS)
@@ -532,7 +572,7 @@ class ProgressBarWindow:
 
             self.tk_pbar.configure(maximum=100, mode='indeterminate')
         else:
-            #assert self.pbar is not None
+            assert self.pbar is not None
             self.pbar.close()
             self.pbar = None
             print()
@@ -540,7 +580,7 @@ class ProgressBarWindow:
     def set_prefix(self, prefix) -> None:
         self.prefix = prefix
 
-g_progressBarWindow: Optional[ProgressBarWindow] = None
+g_progressBarWindow: ProgressBarWindow | None = None
 
 def eprint(*args, **kwargs) -> None:
     print(*args, file=sys.stderr, **kwargs)
@@ -567,8 +607,13 @@ def utilsGetPath(path_arg: str, fallback_path: str, is_file: bool, create: bool 
 def utilsIsValueAlignedToEndpointPacketSize(value: int) -> bool:
     return bool((value & (g_usbEpMaxPacketSize - 1)) == 0)
 
-def utilsResetNspInfo() -> None:
+def utilsResetNspInfo(delete: bool = False) -> None:
     global g_nspTransferMode, g_nspSize, g_nspHeaderSize, g_nspRemainingSize, g_nspFile, g_nspFilePath
+
+    if g_nspFile:
+        g_nspFile.close()
+        if delete:
+            os.remove(g_nspFilePath)
 
     # Reset NSP transfer mode info.
     g_nspTransferMode = False
@@ -578,7 +623,7 @@ def utilsResetNspInfo() -> None:
     g_nspFile = None
     g_nspFilePath = ''
 
-def utilsGetSizeUnitAndDivisor(size: int) -> Tuple[str, int]:
+def utilsGetSizeUnitAndDivisor(size: int) -> tuple[str, int]:
     size_suffixes = [ 'B', 'KiB', 'MiB', 'GiB' ]
     size_suffixes_count = len(size_suffixes)
 
@@ -593,29 +638,66 @@ def utilsGetSizeUnitAndDivisor(size: int) -> Tuple[str, int]:
     return ret
 
 def usbGetDeviceEndpoints() -> bool:
-    global g_usbEpIn, g_usbEpOut, g_usbEpMaxPacketSize
+    global g_usbEpIn, g_usbEpOut, g_usbEpMaxPacketSize, g_usbVersion
 
-    #assert g_logger is not None
-    #assert g_stopEvent is not None
+    assert g_logger is not None
 
-    prev_dev = cur_dev = None
+    cur_dev: Generator[usb.core.Device, Any, None] | None = None
+    prev_dev: usb.core.Device | None = None
     usb_ep_in_lambda = lambda ep: usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_IN
     usb_ep_out_lambda = lambda ep: usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_OUT
-    usb_version = 0
+
+    # Try to find libusb backend explicitly on macOS
+    backend = None
+    if platform.system() == 'Darwin':
+        possible_paths = [
+            '/usr/local/lib/libusb-1.0.dylib',  # Intel Homebrew
+            '/opt/homebrew/lib/libusb-1.0.dylib',  # Apple Silicon Homebrew
+            '/usr/lib/libusb-1.0.dylib'  # System location
+        ]
+
+        for path in possible_paths:
+            if os.path.exists(path):
+                g_logger.debug(f'Using libusb from: {path}')
+                backend = usb.backend.libusb1.get_backend(find_library=lambda x: path)
+                break
+
+        if not backend:
+            g_logger.error('Could not find libusb library. Please install it using: brew install libusb')
+            return False
 
     if g_cliMode:
-        g_logger.info(f'Please connect a Nintendo Switch console running {USB_DEV_PRODUCT}.')
+        g_logger.info(SERVER_START_MSG)
 
     while True:
         # Check if the user decided to stop the server.
-        if not g_cliMode and g_stopEvent.is_set():
-            g_stopEvent.clear()
-            return False
+        if not g_cliMode:
+            assert g_stopEvent is not None
+            if g_stopEvent.is_set():
+                g_stopEvent.clear()
+                return False
 
         # Find a connected USB device with a matching VID/PID pair.
         # Using == here to compare both device instances would also compare the backend, so we'll just compare certain elements manually.
-        cur_dev = usb.core.find(idVendor=USB_DEV_VID, idProduct=USB_DEV_PID)
-        if (cur_dev is None) or ((prev_dev is not None) and (cur_dev.bus == prev_dev.bus) and (cur_dev.address == prev_dev.address)):
+        try:
+            if backend:
+                cur_dev = usb.core.find(find_all=False, idVendor=USB_DEV_VID, idProduct=USB_DEV_PID, backend=backend)
+            else:
+                cur_dev = usb.core.find(find_all=False, idVendor=USB_DEV_VID, idProduct=USB_DEV_PID)
+        except:
+            if not g_cliMode:
+                utilsLogException(traceback.format_exc())
+
+            g_logger.error('Fatal error occurred while enumerating USB devices.')
+
+            if g_isWindows:
+                g_logger.error('Try reinstalling the libusbK driver using Zadig.')
+            elif backend:
+                g_logger.error('On macOS, make sure libusb is installed: brew install libusb')
+
+            return False
+
+        if (not isinstance(cur_dev, usb.core.Device)) or (isinstance(prev_dev, usb.core.Device) and (cur_dev.bus == prev_dev.bus) and (cur_dev.address == prev_dev.address)):
             time.sleep(0.1)
             continue
 
@@ -651,21 +733,19 @@ def usbGetDeviceEndpoints() -> bool:
 
         # Save endpoint max packet size and USB version.
         g_usbEpMaxPacketSize = g_usbEpIn.wMaxPacketSize
-        usb_version = cur_dev.bcdUSB
+        g_usbVersion = f'{cur_dev.bcdUSB >> 8}.{(cur_dev.bcdUSB & 0xFF) >> 4}'
 
         break
 
     g_logger.debug(f'Successfully retrieved USB endpoints! (bus {cur_dev.bus}, address {cur_dev.address}).')
-    g_logger.debug(f'Max packet size: 0x{g_usbEpMaxPacketSize:X} (USB {usb_version >> 8}.{(usb_version & 0xFF) >> 4}).\n')
+    g_logger.debug(f'Max packet size: 0x{g_usbEpMaxPacketSize:X}. BCD USB: 0x{cur_dev.bcdUSB:04X}.\n')
 
     if g_cliMode:
-        g_logger.info(f'Exit {USB_DEV_PRODUCT} or disconnect your console at any time to close this script.')
+        g_logger.info(SERVER_STOP_MSG)
 
     return True
 
 def usbRead(size: int, timeout: int = -1) -> bytes:
-    #assert g_logger is not None
-
     rd = b''
 
     try:
@@ -674,13 +754,13 @@ def usbRead(size: int, timeout: int = -1) -> bytes:
     except usb.core.USBError:
         if not g_cliMode:
             utilsLogException(traceback.format_exc())
-        g_logger.error('\nUSB timeout triggered or console disconnected.')
+
+        if g_logger is not None:
+            g_logger.error('\nUSB timeout triggered or console disconnected.')
 
     return rd
 
 def usbWrite(data: bytes, timeout: int = -1) -> int:
-    #assert g_logger is not None
-
     wr = 0
 
     try:
@@ -688,18 +768,20 @@ def usbWrite(data: bytes, timeout: int = -1) -> int:
     except usb.core.USBError:
         if not g_cliMode:
             utilsLogException(traceback.format_exc())
-        g_logger.error('\nUSB timeout triggered or console disconnected.')
+
+        if g_logger is not None:
+            g_logger.error('\nUSB timeout triggered or console disconnected.')
 
     return wr
 
 def usbSendStatus(code: int) -> bool:
-    status = struct.pack('<4sIH6p', USB_MAGIC_WORD, code, g_usbEpMaxPacketSize, b'')
+    status = struct.pack('<4sIH6x', USB_MAGIC_WORD, code, g_usbEpMaxPacketSize)
     return bool(usbWrite(status, USB_TRANSFER_TIMEOUT) == len(status))
 
 def usbHandleStartSession(cmd_block: bytes) -> int:
     global g_nxdtVersionMajor, g_nxdtVersionMinor, g_nxdtVersionMicro, g_nxdtAbiVersionMajor, g_nxdtAbiVersionMinor, g_nxdtGitCommit
 
-    #assert g_logger is not None
+    assert g_logger is not None
 
     if g_cliMode:
         print()
@@ -715,21 +797,26 @@ def usbHandleStartSession(cmd_block: bytes) -> int:
     g_nxdtAbiVersionMinor = (abi_version & 0x0F)
 
     # Print client info.
-    g_logger.info(f'Client info: {USB_DEV_PRODUCT} v{g_nxdtVersionMajor}.{g_nxdtVersionMinor}.{g_nxdtVersionMicro}, USB ABI v{g_nxdtAbiVersionMajor}.{g_nxdtAbiVersionMinor} (commit {g_nxdtGitCommit}).\n')
+    g_logger.info(f'Client info: {USB_DEV_PRODUCT} v{g_nxdtVersionMajor}.{g_nxdtVersionMinor}.{g_nxdtVersionMicro} (commit {g_nxdtGitCommit}), USB ABI v{g_nxdtAbiVersionMajor}.{g_nxdtAbiVersionMinor} over USB {g_usbVersion}.\n')
 
     # Check if we support this ABI version.
     if (g_nxdtAbiVersionMajor != USB_ABI_VERSION_MAJOR) or (g_nxdtAbiVersionMinor != USB_ABI_VERSION_MINOR):
-        g_logger.error('Unsupported ABI version!')
+        g_logger.error('Unsupported ABI version!\nPlease update this script and the nxdumptool binary.')
         return USB_STATUS_UNSUPPORTED_ABI_VERSION
 
     # Return status code.
     return USB_STATUS_SUCCESS
 
+def usbHandleEndSession(cmd_block: bytes) -> int:
+    assert g_logger is not None
+    g_logger.debug(f'Received EndSession ({USB_CMD_END_SESSION:02X}) command.')
+    return USB_STATUS_SUCCESS
+
 def usbHandleSendFileProperties(cmd_block: bytes) -> int | None:
     global g_nspTransferMode, g_nspSize, g_nspHeaderSize, g_nspRemainingSize, g_nspFile, g_nspFilePath, g_outputDir, g_tkRoot, g_progressBarWindow
 
-    #assert g_logger is not None
-    #assert g_progressBarWindow is not None
+    assert g_logger is not None
+    assert g_progressBarWindow is not None
 
     if g_cliMode and not g_nspTransferMode:
         print()
@@ -737,8 +824,9 @@ def usbHandleSendFileProperties(cmd_block: bytes) -> int | None:
     g_logger.debug(f'Received SendFileProperties ({USB_CMD_SEND_FILE_PROPERTIES:02X}) command.')
 
     # Parse command block.
-    (file_size, filename_length, nsp_header_size, raw_filename) = struct.unpack_from(f'<QII{USB_FILE_PROPERTIES_MAX_NAME_LENGTH}s', cmd_block, 0)
-    filename = raw_filename.decode('utf-8').strip('\x00')
+    (file_size, filename_length, nsp_header_size) = struct.unpack_from('<QII', cmd_block, 0)
+    raw_filename = struct.unpack_from(f'<{filename_length}s', cmd_block, 16)[0]
+    filename = raw_filename.decode('utf-8')
 
     # Print info.
     dbg_str = f'File size: 0x{file_size:X} | Filename length: 0x{filename_length:X}'
@@ -751,7 +839,7 @@ def usbHandleSendFileProperties(cmd_block: bytes) -> int | None:
     if not g_cliMode or (g_cliMode and not g_nspTransferMode):
         g_logger.info(f'Receiving {file_type_str}: "{filename}".')
 
-    # Perform validity checks.
+    # Perform sanity checks.
     if (not g_nspTransferMode) and file_size and (nsp_header_size >= file_size):
         g_logger.error('NSP header size must be smaller than the full NSP size!\n')
         return USB_STATUS_MALFORMED_CMD
@@ -774,10 +862,11 @@ def usbHandleSendFileProperties(cmd_block: bytes) -> int | None:
         g_nspFilePath = ''
         g_logger.debug('NSP transfer mode enabled!\n')
 
-    # Perform additional validity checks and get a file object to work with.
+    # Perform additional sanity checks and get a file object to work with.
     if (not g_nspTransferMode) or (g_nspFile is None):
         # Generate full, absolute path to the destination file.
         fullpath = os.path.abspath(g_outputDir + os.path.sep + filename)
+        printable_fullpath = (fullpath[4:] if g_isWindows else fullpath)
 
         # Get parent directory path.
         dirpath = os.path.dirname(fullpath)
@@ -788,11 +877,11 @@ def usbHandleSendFileProperties(cmd_block: bytes) -> int | None:
         # Make sure the output filepath doesn't point to an existing directory.
         if os.path.exists(fullpath) and (not os.path.isfile(fullpath)):
             utilsResetNspInfo()
-            g_logger.error(f'Output filepath points to an existing directory! ("{fullpath}").\n')
+            g_logger.error(f'Output filepath points to an existing directory! ("{printable_fullpath}").\n')
             return USB_STATUS_HOST_IO_ERROR
 
         # Make sure we have enough free space.
-        (total_space, used_space, free_space) = shutil.disk_usage(dirpath)
+        (_, _, free_space) = shutil.disk_usage(dirpath)
         if free_space <= file_size:
             utilsResetNspInfo()
             g_logger.error('Not enough free space available in output volume!\n')
@@ -815,6 +904,7 @@ def usbHandleSendFileProperties(cmd_block: bytes) -> int | None:
         file = g_nspFile
         fullpath = g_nspFilePath
         dirpath = os.path.dirname(fullpath)
+        printable_fullpath = (fullpath[4:] if g_isWindows else fullpath)
 
     # Check if we're dealing with an empty file or with the first SendFileProperties command from a NSP.
     if (not file_size) or (g_nspTransferMode and file_size == g_nspSize):
@@ -829,7 +919,7 @@ def usbHandleSendFileProperties(cmd_block: bytes) -> int | None:
     usbSendStatus(USB_STATUS_SUCCESS)
 
     # Start data transfer stage.
-    g_logger.debug(f'Data transfer started. Saving {file_type_str} to: "{fullpath}".')
+    g_logger.debug(f'Data transfer started. {"Saving" if file_type_str == "file" else "Writing"} {file_type_str} to: "{printable_fullpath}".')
 
     offset = 0
     blksize = USB_TRANSFER_BLOCK_SIZE
@@ -841,10 +931,7 @@ def usbHandleSendFileProperties(cmd_block: bytes) -> int | None:
             # We're not using dynamic tqdm prefixes under CLI mode.
             prefix = ''
         else:
-            idx = filename.rfind(os.path.sep)
-            prefix_filename = (filename[idx+1:] if (idx >= 0) else filename)
-
-            prefix = f'Current {file_type_str}: "{prefix_filename}".\n'
+            prefix = f'Current {file_type_str}: "{os.path.basename(filename)}".\n'
             prefix += 'Use your console to cancel the file transfer if you wish to do so.'
 
         if (not g_nspTransferMode) or g_nspRemainingSize == (g_nspSize - g_nspHeaderSize):
@@ -857,21 +944,21 @@ def usbHandleSendFileProperties(cmd_block: bytes) -> int | None:
                 pbar_n = g_nspHeaderSize
                 pbar_file_size = g_nspSize
 
-            # Get progress bar unit and unit divider. These will be used to display and calculate size values using a specific size unit (B, KiB, MiB, GiB).
-            (unit, unit_divider) = utilsGetSizeUnitAndDivisor(pbar_file_size)
-
             # Display progress bar window.
-            g_progressBarWindow.start(pbar_file_size, pbar_n, unit_divider, prefix, unit)
+            g_progressBarWindow.start(pbar_file_size, pbar_n, prefix)
         else:
             # Set current prefix (holds the filename for the current NSP file entry).
             g_progressBarWindow.set_prefix(prefix)
 
     def cancelTransfer():
         # Cancel file transfer.
-        file.close()
-        os.remove(fullpath)
-        utilsResetNspInfo()
-        if use_pbar:
+        if g_nspTransferMode:
+            utilsResetNspInfo(True)
+        else:
+            file.close()
+            os.remove(fullpath)
+
+        if use_pbar and (g_progressBarWindow is not None):
             g_progressBarWindow.end()
 
     # Start transfer process.
@@ -902,12 +989,12 @@ def usbHandleSendFileProperties(cmd_block: bytes) -> int | None:
 
         # Check if we're dealing with a CancelFileTransfer command.
         if chunk_size == USB_CMD_HEADER_SIZE:
-            (magic, cmd_id, cmd_block_size) = struct.unpack_from('<4sII', chunk, 0)
-            if (magic == USB_MAGIC_WORD) and (cmd_id == USB_CMD_CANCEL_FILE_TRANSFER):
+            (magic, cmd_id, cmd_block_size, _) = struct.unpack_from('<4sIII', chunk, 0)
+            if (magic == USB_MAGIC_WORD) and (cmd_id == USB_CMD_CANCEL_FILE_TRANSFER) and (cmd_block_size == 0):
                 # Cancel file transfer.
                 cancelTransfer()
 
-                g_logger.debug(f'Received CancelFileTransfer ({USB_CMD_CANCEL_FILE_TRANSFER:02X}) command.')
+                g_logger.debug(f'Received CancelFileTransfer ({USB_CMD_CANCEL_FILE_TRANSFER:02X}) command:\n{bytes.hex(chunk, " ", 1)}\n')
                 g_logger.warning('Transfer cancelled.')
 
                 # Let the command handler take care of sending the status response for us.
@@ -944,8 +1031,8 @@ def usbHandleSendFileProperties(cmd_block: bytes) -> int | None:
 def usbHandleSendNspHeader(cmd_block: bytes) -> int:
     global g_nspTransferMode, g_nspHeaderSize, g_nspRemainingSize, g_nspFile, g_nspFilePath
 
-    #assert g_logger is not None
-    #assert g_nspFile is not None
+    assert g_logger is not None
+    assert g_nspFile is not None
 
     nsp_header_size = len(cmd_block)
 
@@ -967,7 +1054,6 @@ def usbHandleSendNspHeader(cmd_block: bytes) -> int:
     # Write NSP header.
     g_nspFile.seek(0)
     g_nspFile.write(cmd_block)
-    g_nspFile.close()
 
     g_logger.debug(f'Successfully wrote 0x{nsp_header_size:X}-byte long NSP header to "{g_nspFilePath}".\n')
 
@@ -976,20 +1062,76 @@ def usbHandleSendNspHeader(cmd_block: bytes) -> int:
 
     return USB_STATUS_SUCCESS
 
-def usbHandleEndSession(cmd_block: bytes) -> int:
-    #assert g_logger is not None
-    g_logger.debug(f'Received EndSession ({USB_CMD_END_SESSION:02X}) command.')
+def usbHandleCancelFileTransfer(cmd_block: bytes) -> int:
+    assert g_logger is not None
+
+    g_logger.debug(f'Received CancelFileTransfer ({USB_CMD_CANCEL_FILE_TRANSFER:02X}) command.')
+
+    if g_nspTransferMode:
+        if (g_nspSize > USB_TRANSFER_THRESHOLD) and (g_progressBarWindow is not None):
+            g_progressBarWindow.end()
+
+        utilsResetNspInfo(True)
+
+        g_logger.warning('Transfer cancelled.')
+        return USB_STATUS_SUCCESS
+    else:
+        g_logger.error('Unexpected transfer cancellation.')
+        return USB_STATUS_MALFORMED_CMD
+
+def usbHandleStartExtractedFsDump(cmd_block: bytes) -> int:
+    assert g_logger is not None
+
+    g_logger.debug(f'Received StartExtractedFsDump ({USB_CMD_START_EXTRACTED_FS_DUMP:02X}) command.')
+
+    if g_nspTransferMode:
+        g_logger.error('StartExtractedFsDump received mid NSP transfer.')
+        return USB_STATUS_MALFORMED_CMD
+
+    # Parse command block.
+    (extracted_fs_size, extracted_fs_root_path) = struct.unpack_from(f'<Q{USB_FILE_PROPERTIES_MAX_NAME_LENGTH}s', cmd_block, 0)
+    extracted_fs_root_path = extracted_fs_root_path.decode('utf-8').strip('\x00')
+
+    g_logger.info(f'Starting extracted FS dump (size 0x{extracted_fs_size:X}, output relative path "{extracted_fs_root_path}").')
+
+    # Return status code.
+    return USB_STATUS_SUCCESS
+
+def usbHandleStartBulkNspDump(cmd_block: bytes) -> int:
+    assert g_logger is not None
+
+    g_logger.debug(f'Received StartBulkNspDump ({USB_CMD_START_BULK_NSP_DUMP:02X}) command.')
+
+    if g_nspTransferMode:
+        g_logger.error('StartBulkNspDump received mid NSP transfer.')
+        return USB_STATUS_MALFORMED_CMD
+
+    # Parse command block.
+    nsp_count = struct.unpack_from(f'<I', cmd_block, 0)[0]
+
+    g_logger.info(f'Starting bulk NSP dump ({nsp_count} NSP[s]).')
+
+    # Return status code.
+    return USB_STATUS_SUCCESS
+
+def usbHandleEndBulkOperation(cmd_block: bytes) -> int:
+    assert g_logger is not None
+    g_logger.debug(f'Received EndBulkOperation ({USB_CMD_END_BULK_OPERATION:02X}) command.')
+    g_logger.info(f'Finished bulk operation.')
     return USB_STATUS_SUCCESS
 
 def usbCommandHandler() -> None:
-    #assert g_logger is not None
+    assert g_logger is not None
 
-    # CancelFileTransfer is handled in usbHandleSendFileProperties().
     cmd_dict = {
-        USB_CMD_START_SESSION:        usbHandleStartSession,
-        USB_CMD_SEND_FILE_PROPERTIES: usbHandleSendFileProperties,
-        USB_CMD_SEND_NSP_HEADER:      usbHandleSendNspHeader,
-        USB_CMD_END_SESSION:          usbHandleEndSession
+        USB_CMD_START_SESSION:           usbHandleStartSession,
+        USB_CMD_END_SESSION:             usbHandleEndSession,
+        USB_CMD_SEND_FILE_PROPERTIES:    usbHandleSendFileProperties,
+        USB_CMD_SEND_NSP_HEADER:         usbHandleSendNspHeader,
+        USB_CMD_CANCEL_FILE_TRANSFER:    usbHandleCancelFileTransfer,
+        USB_CMD_START_EXTRACTED_FS_DUMP: usbHandleStartExtractedFsDump,
+        USB_CMD_START_BULK_NSP_DUMP:     usbHandleStartBulkNspDump,
+        USB_CMD_END_BULK_OPERATION:      usbHandleEndBulkOperation
     }
 
     # Get device endpoints.
@@ -1001,8 +1143,8 @@ def usbCommandHandler() -> None:
 
     if not g_cliMode:
         # Update UI.
-        #assert g_tkCanvas is not None
-        #assert g_tkServerButton is not None
+        assert g_tkCanvas is not None
+        assert g_tkServerButton is not None
         g_tkCanvas.itemconfigure(g_tkTipMessage, state='normal', text=SERVER_STOP_MSG)
         g_tkServerButton.configure(state='disabled')
 
@@ -1016,8 +1158,10 @@ def usbCommandHandler() -> None:
             g_logger.error(f'Failed to read 0x{USB_CMD_HEADER_SIZE:X}-byte long command header!')
             break
 
+        g_logger.debug(f'Received command header data:\n{bytes.hex(cmd_header, " ", 1)}\n')
+
         # Parse command header.
-        (magic, cmd_id, cmd_block_size) = struct.unpack_from('<4sII', cmd_header, 0)
+        (magic, cmd_id, cmd_block_size, _) = struct.unpack_from('<4sIII', cmd_header, 0)
 
         # Read command block right away (if needed).
         # nxdumptool expects us to read it right after sending the command header.
@@ -1033,6 +1177,8 @@ def usbCommandHandler() -> None:
             if (not cmd_block) or (len(cmd_block) != cmd_block_size):
                 g_logger.error(f'Failed to read 0x{cmd_block_size:X}-byte long command block for command ID {cmd_id:02X}!')
                 break
+
+            g_logger.debug(f'Received command block data:\n{bytes.hex(cmd_block, " ", 1)}\n')
 
         # Verify magic word.
         if magic != USB_MAGIC_WORD:
@@ -1050,7 +1196,10 @@ def usbCommandHandler() -> None:
         # Verify command block size.
         if (cmd_id == USB_CMD_START_SESSION and cmd_block_size != USB_CMD_BLOCK_SIZE_START_SESSION) or \
            (cmd_id == USB_CMD_SEND_FILE_PROPERTIES and cmd_block_size != USB_CMD_BLOCK_SIZE_SEND_FILE_PROPERTIES) or \
-           (cmd_id == USB_CMD_SEND_NSP_HEADER and not cmd_block_size):
+           (cmd_id == USB_CMD_CANCEL_FILE_TRANSFER and cmd_block_size) or \
+           (cmd_id == USB_CMD_SEND_NSP_HEADER and not cmd_block_size) or \
+           (cmd_id == USB_CMD_START_EXTRACTED_FS_DUMP and cmd_block_size != USB_CMD_BLOCK_SIZE_START_EXTRACTED_FS_DUMP) or \
+           (cmd_id == USB_CMD_START_BULK_NSP_DUMP and cmd_block_size != USB_CMD_BLOCK_SIZE_START_BULK_NSP_DUMP):
             g_logger.error(f'Invalid command block size for command ID {cmd_id:02X}! (0x{cmd_block_size:X}).\n')
             usbSendStatus(USB_STATUS_MALFORMED_CMD)
             continue
@@ -1069,19 +1218,23 @@ def usbCommandHandler() -> None:
 
 def uiStopServer() -> None:
     # Signal the shared stop event.
-    #assert g_stopEvent is not None
+    assert g_stopEvent is not None
     g_stopEvent.set()
 
 def uiStartServer() -> None:
     global g_outputDir
 
-    #assert g_tkDirText is not None
+    assert g_tkDirText is not None
 
     g_outputDir = g_tkDirText.get('1.0', tk.END).strip()
     if not g_outputDir:
         # We should never reach this, honestly.
         messagebox.showerror('Error', 'You must provide an output directory!', parent=g_tkRoot)
         return
+
+    # Unconditionally enable 32-bit paths on Windows.
+    if g_isWindows:
+        g_outputDir = '\\\\?\\' + g_outputDir
 
     # Make sure the full directory tree exists.
     try:
@@ -1099,11 +1252,11 @@ def uiStartServer() -> None:
     server_thread.start()
 
 def uiToggleElements(flag: bool) -> None:
-    #assert g_tkRoot is not None
-    #assert g_tkChooseDirButton is not None
-    #assert g_tkServerButton is not None
-    #assert g_tkCanvas is not None
-    #assert g_tkVerboseCheckbox is not None
+    assert g_tkRoot is not None
+    assert g_tkChooseDirButton is not None
+    assert g_tkServerButton is not None
+    assert g_tkCanvas is not None
+    assert g_tkVerboseCheckbox is not None
 
     if flag:
         g_tkRoot.protocol('WM_DELETE_WINDOW', uiHandleExitProtocol)
@@ -1114,7 +1267,7 @@ def uiToggleElements(flag: bool) -> None:
 
         g_tkVerboseCheckbox.configure(state='normal')
     else:
-        #assert g_tkScrolledTextLog is not None
+        assert g_tkScrolledTextLog is not None
 
         g_tkRoot.protocol('WM_DELETE_WINDOW', uiHandleExitProtocolStub)
 
@@ -1134,14 +1287,14 @@ def uiChooseDirectory() -> None:
         uiUpdateDirectoryField(os.path.abspath(dir))
 
 def uiUpdateDirectoryField(path: str) -> None:
-    #assert g_tkDirText is not None
+    assert g_tkDirText is not None
     g_tkDirText.configure(state='normal')
     g_tkDirText.delete('1.0', tk.END)
     g_tkDirText.insert('1.0', path)
     g_tkDirText.configure(state='disabled')
 
 def uiHandleExitProtocol() -> None:
-    #assert g_tkRoot is not None
+    assert g_tkRoot is not None
     g_tkRoot.destroy()
 
 def uiHandleExitProtocolStub() -> None:
@@ -1151,8 +1304,8 @@ def uiScaleMeasure(measure: int) -> int:
     return round(float(measure) * SCALE)
 
 def uiHandleVerboseCheckbox() -> None:
-    #assert g_logger is not None
-    #assert g_logLevelIntVar is not None
+    assert g_logger is not None
+    assert g_logLevelIntVar is not None
     g_logger.setLevel(g_logLevelIntVar.get())
 
 def uiInitialize() -> None:
@@ -1278,7 +1431,7 @@ def uiInitialize() -> None:
     console = LogConsole(g_tkScrolledTextLog)
 
     # Initialize progress bar window object.
-    bar_format = '{desc}\n\n{percentage:.2f}% - {n:.2f} / {total:.2f} {unit}\nElapsed time: {elapsed}. Remaining time: {remaining}.\nSpeed: {rate_fmt}.'
+    bar_format = '{desc}\n\n{percentage:.2f}% - {n:.2f} / {total:.2f} {unit}\nElapsed time: {elapsed}. Remaining time: {remaining}.\nSpeed: __custom_rate_fmt__.'
     g_progressBarWindow = ProgressBarWindow(bar_format, g_tkRoot, 'File transfer', False, uiHandleExitProtocolStub)
 
     # Enter Tkinter main loop.
@@ -1286,20 +1439,24 @@ def uiInitialize() -> None:
     g_tkRoot.mainloop()
 
 def cliInitialize() -> None:
-    global g_progressBarWindow
+    global g_progressBarWindow, g_outputDir
 
-    #assert g_logger is not None
+    assert g_logger is not None
 
     # Initialize console logger.
     console = LogConsole()
 
     # Initialize progress bar window object.
-    bar_format = '{percentage:.2f}% |{bar}| {n:.2f}/{total:.2f} [{elapsed}<{remaining}, {rate_fmt}]'
+    bar_format = '{percentage:.2f}% |{bar}| {n:.2f}/{total:.2f} {unit} [{elapsed}<{remaining}, __custom_rate_fmt__]'
     g_progressBarWindow = ProgressBarWindow(bar_format)
 
     # Print info.
-    g_logger.info('\n' + SCRIPT_TITLE + '. ' + COPYRIGHT_TEXT + '.')
-    g_logger.info('Output directory: "' + g_outputDir + '".\n')
+    g_logger.info(f'\n{SCRIPT_TITLE}. {COPYRIGHT_TEXT}.')
+    g_logger.info(f'Output directory: "{g_outputDir}".\n')
+
+    # Unconditionally enable 32-bit paths on Windows.
+    if g_isWindows:
+        g_outputDir = '\\\\?\\' + g_outputDir
 
     # Start USB command handler directly.
     usbCommandHandler()
@@ -1311,9 +1468,9 @@ def main() -> int:
     warnings.filterwarnings("ignore")
 
     # Parse command line arguments.
-    parser = ArgumentParser(description=SCRIPT_TITLE + '. ' + COPYRIGHT_TEXT + '.')
+    parser = ArgumentParser(description=f'{SCRIPT_TITLE}. {COPYRIGHT_TEXT}.')
     parser.add_argument('-c', '--cli', required=False, action='store_true', default=False, help='Start the script in CLI mode.')
-    parser.add_argument('-o', '--outdir', required=False, type=str, metavar='DIR', help='Path to output directory. Defaults to "' + DEFAULT_DIR + '".')
+    parser.add_argument('-o', '--outdir', required=False, type=str, metavar='DIR', help=f'Path to output directory. Defaults to "{DEFAULT_DIR}".')
     parser.add_argument('-v', '--verbose', required=False, action='store_true', default=False, help='Enable verbose output.')
     args = parser.parse_args()
 
@@ -1361,7 +1518,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         time.sleep(0.2)
         print('\nScript interrupted.')
-    except Exception as e:
+    except:
         utilsLogException(traceback.format_exc())
 
     try:

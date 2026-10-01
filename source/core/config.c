@@ -1,7 +1,7 @@
 /*
  * config.c
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -19,9 +19,9 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
-#include "config.h"
-#include "title.h"
+#include <core/nxdt_utils.h>
+#include <core/config.h>
+#include <core/title.h>
 
 #define CONFIG_VALIDATE_FIELD(type, name, ...) \
 if (!strcmp(key, #name)) { \
@@ -66,6 +66,7 @@ static struct json_object *g_configJson = NULL;
 /* Function prototypes. */
 
 static bool configParseConfigJson(void);
+static bool configResetConfigJson(void);
 static void configWriteConfigJson(void);
 static void configFreeConfigJson(void);
 
@@ -111,6 +112,11 @@ void configExit(void)
     }
 }
 
+void configResetSettings(void)
+{
+    configResetConfigJson();
+}
+
 CONFIG_GETTER(Boolean, bool);
 CONFIG_SETTER(Boolean, bool);
 
@@ -151,25 +157,32 @@ static bool configParseConfigJson(void)
         jsonLogLastError();
     }
 
-    if (use_default_config)
-    {
-        LOG_MSG_INFO("Loading default configuration.");
-
-        /* Free config JSON. */
-        configFreeConfigJson();
-
-        /* Read default config JSON. */
-        g_configJson = json_object_from_file(DEFAULT_CONFIG_PATH);
-        if (g_configJson)
-        {
-            configWriteConfigJson();
-            ret = true;
-        } else {
-            jsonLogLastError();
-        }
-    }
+    /* Try to load the default settings. */
+    if (use_default_config) ret = configResetConfigJson();
 
     if (!ret) LOG_MSG_ERROR("Failed to parse both current and default JSON configuration files!");
+
+    return ret;
+}
+
+static bool configResetConfigJson(void)
+{
+    bool ret = false;
+
+    LOG_MSG_INFO("Loading default configuration.");
+
+    /* Free config JSON. */
+    configFreeConfigJson();
+
+    /* Read default config JSON. */
+    g_configJson = json_object_from_file(DEFAULT_CONFIG_PATH);
+    if (g_configJson)
+    {
+        configWriteConfigJson();
+        ret = true;
+    } else {
+        jsonLogLastError();
+    }
 
     return ret;
 }
@@ -197,7 +210,7 @@ static bool configValidateJsonRootObject(const struct json_object *obj)
     json_object_object_foreach(obj, key, val)
     {
         CONFIG_VALIDATE_FIELD(Boolean, overclock);
-        CONFIG_VALIDATE_FIELD(Integer, naming_convention, TitleNamingConvention_Full, TitleNamingConvention_Count - 1);
+        CONFIG_VALIDATE_FIELD(Integer, naming_convention, (int)TitleNamingConvention_Full, (int)TitleNamingConvention_Count - 1);
         CONFIG_VALIDATE_FIELD(Integer, output_storage, ConfigOutputStorage_SdCard, ConfigOutputStorage_Count - 1);
         CONFIG_VALIDATE_OBJECT(GameCard, gamecard);
         CONFIG_VALIDATE_OBJECT(Nsp, nsp);
@@ -215,7 +228,7 @@ end:
 static bool configValidateJsonGameCardObject(const struct json_object *obj)
 {
     bool ret = false, prepend_key_area_found = false, keep_certificate_found = false, trim_dump_found = false, calculate_checksum_found = false;
-    bool checksum_lookup_method_found = false, write_raw_hfs_partition_found = false;
+    bool lookup_checksum_found = false, write_raw_hfs_partition_found = false;
 
     if (!jsonValidateObject(obj)) goto end;
 
@@ -225,12 +238,12 @@ static bool configValidateJsonGameCardObject(const struct json_object *obj)
         CONFIG_VALIDATE_FIELD(Boolean, keep_certificate);
         CONFIG_VALIDATE_FIELD(Boolean, trim_dump);
         CONFIG_VALIDATE_FIELD(Boolean, calculate_checksum);
-        CONFIG_VALIDATE_FIELD(Integer, checksum_lookup_method, ConfigChecksumLookupMethod_None, ConfigChecksumLookupMethod_Count - 1);
+        CONFIG_VALIDATE_FIELD(Boolean, lookup_checksum);
         CONFIG_VALIDATE_FIELD(Boolean, write_raw_hfs_partition);
         goto end;
     }
 
-    ret = (prepend_key_area_found && keep_certificate_found && trim_dump_found && calculate_checksum_found && checksum_lookup_method_found && write_raw_hfs_partition_found);
+    ret = (prepend_key_area_found && keep_certificate_found && trim_dump_found && calculate_checksum_found && lookup_checksum_found && write_raw_hfs_partition_found);
 
 end:
     return ret;

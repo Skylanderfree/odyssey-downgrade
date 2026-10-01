@@ -1,7 +1,7 @@
 /*
  * defines.h
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -60,16 +60,22 @@
 
 /* Global constants used throughout the application. */
 
-#define THIRTY_FPS_DELAY                (u64)33333333                                                                           /* 1 / 30 = 33.33 milliseconds. */
+#define SHA256_HASH_STR_SIZE            ((SHA256_HASH_SIZE * 2) + 1)                                    /* Includes NULL terminator. */
+
+#define THIRTY_FPS_DELAY                (u64)33333333                                                   /* 1 / 30 = 33.33 milliseconds. */
 
 #define FS_SYSMODULE_TID                (u64)0x0100000000000000
 #define BOOT_SYSMODULE_TID              (u64)0x0100000000000005
 #define SPL_SYSMODULE_TID               (u64)0x0100000000000028
 #define ES_SYSMODULE_TID                (u64)0x0100000000000033
+#define SYSTEM_VERSION_TID              (u64)0x0100000000000809
 #define SYSTEM_UPDATE_TID               (u64)0x0100000000000816
+#define BOOTPKG_EXFAT_TID               (u64)0x010000000000081B
+#define BOOTPKG_EXFAT_SAFE_TID          (u64)0x010000000000081C
 #define QLAUNCH_TID                     (u64)0x0100000000001000
 
-#define FAT32_FILESIZE_LIMIT            (u64)0xFFFFFFFF                                                                         /* 4 GiB - 1 (4294967295 bytes). */
+#define FAT32_FILESIZE_LIMIT            (u64)UINT32_MAX                                                 /* 4 GiB - 1 (4294967295 bytes). */
+#define CONCATENATION_FILE_PART_SIZE    (u64)0xFFFF0000                                                 /* 4 GiB - 65536 (4294901760 bytes). */
 
 #define UTF8_BOM                        "\xEF\xBB\xBF"
 #define CRLF                            "\r\n"
@@ -79,12 +85,15 @@
 #define HBMENU_BASE_PATH                "/switch/"
 #define APP_BASE_PATH                   HBMENU_BASE_PATH APP_TITLE "/"
 
-#define GAMECARD_PATH                   APP_BASE_PATH "Gamecard/"
-#define HFS_PATH                        APP_BASE_PATH "HFS/"
-#define NSP_PATH                        APP_BASE_PATH "NSP/"
-#define TICKET_PATH                     APP_BASE_PATH "Ticket/"
-#define NCA_PATH                        APP_BASE_PATH "NCA/"
-#define NCA_FS_PATH                     APP_BASE_PATH "NCA FS/"
+#define GAMECARD_SUBDIR                 "Gamecard"
+#define HFS_SUBDIR                      "HFS"
+#define NSP_SUBDIR                      "NSP"
+#define TICKET_SUBDIR                   "Ticket"
+#define NCA_SUBDIR                      "NCA"
+#define NCA_FS_SUBDIR                   "NCA FS"
+#define SYSMMC_SUBDIR                   "sysMMC"
+#define EMUMMC_SUBDIR                   "emuMMC"
+#define SYSTEM_UPDATE_SUBDIR            "System Update"
 
 #define CONFIG_FILE_NAME                APP_TITLE "_config.json"
 #define DEFAULT_CONFIG_PATH             "romfs:/default_config.json"
@@ -93,22 +102,29 @@
 #define NRO_PATH                        DEVOPTAB_SDMC_DEVICE APP_BASE_PATH NRO_NAME
 #define NRO_TMP_PATH                    NRO_PATH ".tmp"
 
-#define PROD_KEYS_FILE_PATH             DEVOPTAB_SDMC_DEVICE HBMENU_BASE_PATH "prod.keys"                                       /* Location used by Lockpick_RCM for retail unit keys. */
-#define DEV_KEYS_FILE_PATH              DEVOPTAB_SDMC_DEVICE HBMENU_BASE_PATH "dev.keys"                                        /* Location used by Lockpick_RCM for development unit keys. */
+#define PROD_KEYS_FILE_PATH             DEVOPTAB_SDMC_DEVICE HBMENU_BASE_PATH "prod.keys"               /* Retail unit keys. */
+#define DEV_KEYS_FILE_PATH              DEVOPTAB_SDMC_DEVICE HBMENU_BASE_PATH "dev.keys"                /* Development unit keys. */
 
 #define LOG_FILE_NAME                   APP_TITLE ".log"
-#define LOG_BUF_SIZE                    0x400000                                                                                /* 4 MiB. */
-#define LOG_FORCE_FLUSH                 0                                                                                       /* Forces a log buffer flush each time the logfile is written to. */
+#define LOG_BUF_SIZE                    0x400000                                                        /* 4 MiB. */
+#define LOG_FORCE_FLUSH                 0                                                               /* Forces a log buffer flush each time the logfile is written to. */
 
-#define BIS_SYSTEM_PARTITION_MOUNT_NAME "sys:"
+#define BIS_FAT_PARTITION_COUNT         4
 
-#define DOWNLOAD_TASK_INTERVAL          100                                                                                     /* 100 milliseconds. */
+/// Reference: https://docs.microsoft.com/en-us/windows/win32/fileio/filesystem-functionality-comparison#limits.
+/// Reference: https://en.wikipedia.org/wiki/Comparison_of_file_systems#Limits.
+/// Most modern filesystems use a 255-byte limit instead of 255-character/codepoint limit, so that's what we're gonna use.
+#define FS_MAX_FILENAME_LENGTH          255
+#define SDMC_MAX_FILENAME_LENGTH        128                                                             /* Arbitrarily set, I'm tired of FS sysmodule shenanigans. */
+
+#define REPEATING_TASK_INTERVAL         250                                                             /* 250 milliseconds. */
+#define DATA_TRANSFER_TASK_INTERVAL     100                                                             /* 100 milliseconds. */
 
 #define HTTP_USER_AGENT                 APP_TITLE "/" APP_VERSION " (Nintendo Switch)"
-#define HTTP_CONNECT_TIMEOUT            10L                                                                                     /* 10 seconds. */
-#define HTTP_LOW_SPEED_LIMIT            30L                                                                                     /* 30 bytes per second. */
+#define HTTP_CONNECT_TIMEOUT            10L                                                             /* 10 seconds. */
+#define HTTP_LOW_SPEED_LIMIT            30L                                                             /* 30 bytes per second. */
 #define HTTP_LOW_SPEED_TIME             HTTP_CONNECT_TIMEOUT
-#define HTTP_BUFFER_SIZE                131072L                                                                                 /* 128 KiB. */
+#define HTTP_BUFFER_SIZE                131072L                                                         /* 128 KiB. */
 
 #define GITHUB_URL                      "https://github.com"
 #define GITHUB_API_URL                  "https://api.github.com"
@@ -119,10 +135,6 @@
 
 #define GITHUB_API_RELEASE_URL          GITHUB_API_URL "/repos/" GITHUB_REPOSITORY "/releases/latest"
 
-#define NSWDB_XML_URL                   "http://nswdb.com/xml.php"
-#define NSWDB_XML_NAME                  "NSWreleases.xml"
-#define NSWDB_XML_PATH                  APP_BASE_PATH NSWDB_XML_NAME
-
 #define BOREALIS_URL                    "https://github.com/natinusala/borealis"
 #define LIBUSBHSFS_URL                  "https://github.com/DarkMatterCore/libusbhsfs"
 #define FATFS_URL                       "http://elm-chan.org/fsw/ff/00index_e.html"
@@ -131,6 +143,7 @@
 
 #define DISCORD_SERVER_URL              "https://discord.gg/SCbbcQx"
 
-#define LOCKPICK_RCM_URL                "https://github.com/shchmue/Lockpick_RCM"
+// TODO: remove this after the PoC builds are no longer needed.
+#define PRERELEASE_URL                  GITHUB_URL "/" APP_AUTHOR "/nxdumptool/releases/tag/rewrite-prerelease"
 
 #endif  /* __DEFINES_H__ */

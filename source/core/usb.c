@@ -4,7 +4,7 @@
  * Heavily based in usb_comms from libnx.
  *
  * Copyright (c) 2018-2020, Switchbrew and libnx contributors.
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -22,17 +22,17 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
-#include "usb.h"
+#include <core/nxdt_utils.h>
+#include <core/usb.h>
 
 #define USB_ABI_VERSION_MAJOR       1
-#define USB_ABI_VERSION_MINOR       1
+#define USB_ABI_VERSION_MINOR       4
 #define USB_ABI_VERSION             ((USB_ABI_VERSION_MAJOR << 4) | USB_ABI_VERSION_MINOR)
 
 #define USB_CMD_HEADER_MAGIC        0x4E584454                  /* "NXDT". */
 
 #define USB_TRANSFER_ALIGNMENT      0x1000                      /* 4 KiB. */
-#define USB_TRANSFER_TIMEOUT        5                           /* 5 seconds. */
+#define USB_TRANSFER_TIMEOUT        10                          /* 10 seconds. */
 
 #define USB_DEV_VID                 0x057E                      /* VID officially used by Nintendo in usb:ds. */
 #define USB_DEV_PID                 0x3000                      /* PID officially used by Nintendo in usb:ds. */
@@ -56,18 +56,28 @@
 
 /* Type definitions. */
 
-typedef enum {
-    UsbCommandType_StartSession       = 0,
-    UsbCommandType_SendFileProperties = 1,
-    UsbCommandType_CancelFileTransfer = 2,
-    UsbCommandType_SendNspHeader      = 3,
-    UsbCommandType_EndSession         = 4,
-    UsbCommandType_Count              = 5   ///< Total values supported by this enum.
+typedef enum : u32 {
+    ///< Session management commands.
+    UsbCommandType_StartSession         = 0,
+    UsbCommandType_EndSession           = 1,
+
+    ///< Regular file transfer commands.
+    UsbCommandType_SendFileProperties   = 2,
+    UsbCommandType_SendNspHeader        = 3,
+    UsbCommandType_CancelFileTransfer   = 4,
+
+    ///< Bulk operation commands.
+    UsbCommandType_StartExtractedFsDump = 5,
+    UsbCommandType_StartBulkNspDump     = 6,
+    UsbCommandType_EndBulkOperation     = 7,
+
+    ///< Total values supported by this enum.
+    UsbCommandType_Count                = 8
 } UsbCommandType;
 
 typedef struct {
     u32 magic;
-    u32 cmd;
+    UsbCommandType cmd;
     u32 cmd_block_size;
     u8 reserved[0x4];
 } UsbCommandHeader;
@@ -90,12 +100,27 @@ typedef struct {
     u32 filename_length;
     u32 nsp_header_size;
     char filename[FS_MAX_PATH];
-    u8 reserved_2[0xF];
+    u8 reserved[0xF];
 } UsbCommandSendFileProperties;
 
 NXDT_ASSERT(UsbCommandSendFileProperties, 0x320);
 
-typedef enum {
+typedef struct {
+    u64 extracted_fs_size;
+    char extracted_fs_root_path[FS_MAX_PATH];
+    u8 reserved[0x6];
+} UsbCommandStartExtractedFsDump;
+
+NXDT_ASSERT(UsbCommandStartExtractedFsDump, 0x310);
+
+typedef struct {
+    u32 nsp_count;
+    u8 reserved[0xC];
+} UsbCommandStartBulkNspDump;
+
+NXDT_ASSERT(UsbCommandStartBulkNspDump, 0x10);
+
+typedef enum : u32 {
     ///< Expected response code.
     UsbStatusType_Success               = 0,
 
@@ -111,12 +136,13 @@ typedef enum {
     UsbStatusType_MalformedCommand      = 7,
     UsbStatusType_HostIoError           = 8,
 
-    UsbStatusType_Count                 = 9         ///< Total values supported by this enum.
+    ///< Total values supported by this enum.
+    UsbStatusType_Count                 = 9
 } UsbStatusType;
 
 typedef struct {
     u32 magic;
-    u32 status;             ///< UsbStatusType.
+    UsbStatusType status;
     u16 max_packet_size;    ///< USB host endpoint max packet size.
     u8 reserved[0x6];
 } UsbStatus;
@@ -150,7 +176,7 @@ enum usb_supported_speed {
 };
 
 /// Imported from libusb, with some adjustments.
-struct PACKED usb_bos_descriptor {
+struct NX_PACKED usb_bos_descriptor {
     u8 bLength;
     u8 bDescriptorType; ///< Must match USB_DT_BOS.
     u16 wTotalLength;   ///< Length of this descriptor and all of its sub descriptors.
@@ -160,7 +186,7 @@ struct PACKED usb_bos_descriptor {
 NXDT_ASSERT(struct usb_bos_descriptor, 0x5);
 
 /// Imported from libusb, with some adjustments.
-struct PACKED usb_2_0_extension_descriptor {
+struct NX_PACKED usb_2_0_extension_descriptor {
     u8 bLength;
     u8 bDescriptorType;     ///< Must match USB_DT_DEVICE_CAPABILITY.
     u8 bDevCapabilityType;  ///< Must match USB_BT_USB_2_0_EXTENSION.
@@ -170,7 +196,7 @@ struct PACKED usb_2_0_extension_descriptor {
 NXDT_ASSERT(struct usb_2_0_extension_descriptor, 0x7);
 
 /// Imported from libusb, with some adjustments.
-struct PACKED usb_ss_usb_device_capability_descriptor {
+struct NX_PACKED usb_ss_usb_device_capability_descriptor {
     u8 bLength;
     u8 bDescriptorType;         ///< Must match USB_DT_DEVICE_CAPABILITY.
     u8 bDevCapabilityType;      ///< Must match USB_BT_SS_USB_DEVICE_CAPABILITY.
@@ -198,7 +224,7 @@ static atomic_bool g_usbDetectionThreadCreated = false;
 
 static u8 *g_usbTransferBuffer = NULL;
 static u64 g_usbTransferRemainingSize = 0, g_usbTransferWrittenSize = 0;
-static u16 g_usbEndpointMaxPacketSize = 0;
+static atomic_ushort g_usbEndpointMaxPacketSize = 0;
 
 /* Function prototypes. */
 
@@ -209,10 +235,10 @@ static void usbDetectionThreadFunc(void *arg);
 static bool usbStartSession(void);
 static void usbEndSession(void);
 
-NX_INLINE void usbPrepareCommandHeader(u32 cmd, u32 cmd_block_size);
+NX_INLINE void usbPrepareCommandHeader(UsbCommandType cmd, u32 cmd_block_size);
 static bool usbSendCommand(void);
-#if LOG_LEVEL <= LOG_LEVEL_ERROR
-static void usbLogStatusDetail(u32 status);
+#if LOG_LEVEL <= LOG_LEVEL_INFO
+static void usbLogStatusDetail(UsbStatusType status);
 #endif
 
 NX_INLINE bool usbAllocateTransferBuffer(void);
@@ -313,28 +339,24 @@ void *usbAllocatePageAlignedBuffer(size_t size)
     return memalign(USB_TRANSFER_ALIGNMENT, size);
 }
 
-u8 usbIsReady(void)
+UsbHostSpeed usbIsReady(void)
 {
-    u8 ret = UsbHostSpeed_None;
+    UsbHostSpeed ret = UsbHostSpeed_None;
+    u16 max_packet_size = atomic_load(&g_usbEndpointMaxPacketSize);
 
-    SCOPED_TRY_LOCK(&g_usbInterfaceMutex)
+    switch(max_packet_size)
     {
-        if (!g_usbHostAvailable || !g_usbSessionStarted) break;
-
-        switch(g_usbEndpointMaxPacketSize)
-        {
-            case USB_FS_EP_MAX_PACKET_SIZE: /* USB 1.x. */
-                ret = UsbHostSpeed_FullSpeed;
-                break;
-            case USB_HS_EP_MAX_PACKET_SIZE: /* USB 2.0. */
-                ret = UsbHostSpeed_HighSpeed;
-                break;
-            case USB_SS_EP_MAX_PACKET_SIZE: /* USB 3.0. */
-                ret = UsbHostSpeed_SuperSpeed;
-                break;
-            default:
-                break;
-        }
+        case USB_FS_EP_MAX_PACKET_SIZE: /* USB 1.x. */
+            ret = UsbHostSpeed_FullSpeed;
+            break;
+        case USB_HS_EP_MAX_PACKET_SIZE: /* USB 2.0. */
+            ret = UsbHostSpeed_HighSpeed;
+            break;
+        case USB_SS_EP_MAX_PACKET_SIZE: /* USB 3.0. */
+            ret = UsbHostSpeed_SuperSpeed;
+            break;
+        default:
+            break;
     }
 
     return ret;
@@ -354,7 +376,7 @@ bool usbSendNspProperties(u64 nsp_size, const char *filename, u32 nsp_header_siz
     return ret;
 }
 
-bool usbSendFileData(void *data, u64 data_size)
+bool usbSendFileData(const void *data, u64 data_size)
 {
     bool ret = false;
 
@@ -363,8 +385,8 @@ bool usbSendFileData(void *data, u64 data_size)
         void *buf = NULL;
         bool zlt_required = false;
 
-        if (!g_usbTransferBuffer || !g_usbInterfaceInit || !g_usbHostAvailable || !g_usbSessionStarted || !g_usbTransferRemainingSize || !data || !data_size || data_size > USB_TRANSFER_BUFFER_SIZE || \
-            data_size > g_usbTransferRemainingSize)
+        if (!g_usbTransferBuffer || !g_usbInterfaceInit || !g_usbHostAvailable || !g_usbSessionStarted || !g_usbTransferRemainingSize || !data || !data_size || \
+            data_size > USB_TRANSFER_BUFFER_SIZE || data_size > g_usbTransferRemainingSize)
         {
             LOG_MSG_ERROR("Invalid parameters!");
             goto end;
@@ -373,7 +395,7 @@ bool usbSendFileData(void *data, u64 data_size)
         /* Optimization for buffers that already are page aligned. */
         if (IS_ALIGNED((u64)data, USB_TRANSFER_ALIGNMENT))
         {
-            buf = data;
+            buf = (void*)data;
         } else {
             buf = g_usbTransferBuffer;
             memcpy(buf, data, data_size);
@@ -385,7 +407,7 @@ bool usbSendFileData(void *data, u64 data_size)
         if ((g_usbTransferRemainingSize - data_size) == 0)
         {
             /* Enable ZLT if the last chunk size is aligned to the USB endpoint max packet size. */
-            if (IS_ALIGNED(data_size, g_usbEndpointMaxPacketSize))
+            if (IS_ALIGNED(data_size, atomic_load(&g_usbEndpointMaxPacketSize)))
             {
                 zlt_required = true;
                 usbSetZltPacket(true);
@@ -430,7 +452,7 @@ bool usbSendFileData(void *data, u64 data_size)
             }
 
             ret = (cmd_status->status == UsbStatusType_Success);
-#if LOG_LEVEL <= LOG_LEVEL_ERROR
+#if LOG_LEVEL <= LOG_LEVEL_INFO
             if (!ret) usbLogStatusDetail(cmd_status->status);
 #endif
         }
@@ -445,6 +467,33 @@ end:
             g_usbTransferRemainingSize = g_usbTransferWrittenSize = 0;
             g_nspTransferMode = false;
         }
+    }
+
+    return ret;
+}
+
+bool usbSendNspHeader(const void *nsp_header, u32 nsp_header_size)
+{
+    bool ret = false;
+
+    SCOPED_LOCK(&g_usbInterfaceMutex)
+    {
+        if (!g_usbInterfaceInit || !g_usbTransferBuffer || !g_usbHostAvailable || !g_usbSessionStarted || g_usbTransferRemainingSize || !g_nspTransferMode || !nsp_header || \
+            !nsp_header_size || nsp_header_size > (USB_TRANSFER_BUFFER_SIZE - sizeof(UsbCommandHeader)))
+        {
+            LOG_MSG_ERROR("Invalid parameters!");
+            break;
+        }
+
+        /* Disable NSP transfer mode right away. */
+        g_nspTransferMode = false;
+
+        /* Prepare command data. */
+        usbPrepareCommandHeader(UsbCommandType_SendNspHeader, nsp_header_size);
+        memcpy(g_usbTransferBuffer + sizeof(UsbCommandHeader), nsp_header, nsp_header_size);
+
+        /* Send command. */
+        ret = usbSendCommand();
     }
 
     return ret;
@@ -468,31 +517,66 @@ void usbCancelFileTransfer(void)
     }
 }
 
-bool usbSendNspHeader(void *nsp_header, u32 nsp_header_size)
+bool usbStartExtractedFsDump(u64 extracted_fs_size, const char *extracted_fs_root_path)
 {
     bool ret = false;
 
     SCOPED_LOCK(&g_usbInterfaceMutex)
     {
-        if (!g_usbInterfaceInit || !g_usbTransferBuffer || !g_usbHostAvailable || !g_usbSessionStarted || g_usbTransferRemainingSize || !g_nspTransferMode || !nsp_header || !nsp_header_size || \
-            nsp_header_size > (USB_TRANSFER_BUFFER_SIZE - sizeof(UsbCommandHeader)))
-        {
-            LOG_MSG_ERROR("Invalid parameters!");
-            break;
-        }
-
-        /* Disable NSP transfer mode right away. */
-        g_nspTransferMode = false;
+        if (!g_usbInterfaceInit || !g_usbTransferBuffer || !g_usbHostAvailable || !g_usbSessionStarted || g_usbTransferRemainingSize || g_nspTransferMode || !extracted_fs_size || \
+            !extracted_fs_root_path || !*extracted_fs_root_path) break;
 
         /* Prepare command data. */
-        usbPrepareCommandHeader(UsbCommandType_SendNspHeader, nsp_header_size);
-        memcpy(g_usbTransferBuffer + sizeof(UsbCommandHeader), nsp_header, nsp_header_size);
+        usbPrepareCommandHeader(UsbCommandType_StartExtractedFsDump, (u32)sizeof(UsbCommandStartExtractedFsDump));
+
+        UsbCommandStartExtractedFsDump *cmd_block = (UsbCommandStartExtractedFsDump*)(g_usbTransferBuffer + sizeof(UsbCommandHeader));
+        memset(cmd_block, 0, sizeof(UsbCommandStartExtractedFsDump));
+
+        cmd_block->extracted_fs_size = extracted_fs_size;
+        snprintf(cmd_block->extracted_fs_root_path, sizeof(cmd_block->extracted_fs_root_path), "%s", extracted_fs_root_path);
 
         /* Send command. */
         ret = usbSendCommand();
     }
 
     return ret;
+}
+
+bool usbStartBulkNspDump(u32 nsp_count)
+{
+    bool ret = false;
+
+    SCOPED_LOCK(&g_usbInterfaceMutex)
+    {
+        if (!g_usbInterfaceInit || !g_usbTransferBuffer || !g_usbHostAvailable || !g_usbSessionStarted || g_usbTransferRemainingSize || g_nspTransferMode || !nsp_count) break;
+
+        /* Prepare command data. */
+        usbPrepareCommandHeader(UsbCommandType_StartBulkNspDump, (u32)sizeof(UsbCommandStartBulkNspDump));
+
+        UsbCommandStartBulkNspDump *cmd_block = (UsbCommandStartBulkNspDump*)(g_usbTransferBuffer + sizeof(UsbCommandHeader));
+        memset(cmd_block, 0, sizeof(UsbCommandStartBulkNspDump));
+
+        cmd_block->nsp_count = nsp_count;
+
+        /* Send command. */
+        ret = usbSendCommand();
+    }
+
+    return ret;
+}
+
+void usbEndBulkOperation(void)
+{
+    SCOPED_LOCK(&g_usbInterfaceMutex)
+    {
+        if (!g_usbInterfaceInit || !g_usbTransferBuffer || !g_usbHostAvailable || !g_usbSessionStarted || g_usbTransferRemainingSize || g_nspTransferMode) break;
+
+        /* Prepare command data. */
+        usbPrepareCommandHeader(UsbCommandType_EndBulkOperation, 0);
+
+        /* Send command. We don't care about the result here. */
+        usbSendCommand();
+    }
 }
 
 static bool usbCreateDetectionThread(void)
@@ -517,7 +601,7 @@ static void usbDestroyDetectionThread(void)
 
 static void usbDetectionThreadFunc(void *arg)
 {
-    (void)arg;
+    NX_IGNORE_ARG(arg);
 
     Result rc = 0;
     int idx = 0;
@@ -544,7 +628,7 @@ static void usbDetectionThreadFunc(void *arg)
             g_usbHostAvailable = usbIsHostAvailable();
             g_usbSessionStarted = false;
             g_usbTransferRemainingSize = g_usbTransferWrittenSize = 0;
-            g_usbEndpointMaxPacketSize = 0;
+            atomic_store(&g_usbEndpointMaxPacketSize, 0);
 
             /* Start a USB session if we're connected to a host device. */
             /* This will essentially hang this thread and all other threads that call USB-related functions until: */
@@ -557,7 +641,7 @@ static void usbDetectionThreadFunc(void *arg)
                 g_usbSessionStarted = usbStartSession();
                 if (g_usbSessionStarted)
                 {
-                    LOG_MSG_INFO("USB session successfully established. Endpoint max packet size: 0x%04X.", g_usbEndpointMaxPacketSize);
+                    LOG_MSG_INFO("USB session successfully established. Endpoint max packet size: 0x%04X.", atomic_load(&g_usbEndpointMaxPacketSize));
                 } else {
                     /* Update exit flag. */
                     exit_flag = g_usbDetectionThreadExitFlag;
@@ -575,7 +659,7 @@ static void usbDetectionThreadFunc(void *arg)
         if (g_usbHostAvailable && g_usbSessionStarted) usbEndSession();
         g_usbHostAvailable = g_usbSessionStarted = g_usbDetectionThreadExitFlag = false;
         g_usbTransferRemainingSize = g_usbTransferWrittenSize = 0;
-        g_usbEndpointMaxPacketSize = 0;
+        atomic_store(&g_usbEndpointMaxPacketSize, 0);
     }
 
     threadExit();
@@ -609,14 +693,15 @@ static bool usbStartSession(void)
         /* Get the endpoint max packet size from the response sent by the USB host. */
         /* This is done to accurately know when and where to enable Zero Length Termination (ZLT) packets during bulk transfers. */
         /* As much as I'd like to avoid this, the GetUsbDeviceSpeed cmd from usb:ds is only available in HOS 8.0.0+ -- and we definitely want to provide USB comms under older versions. */
-        g_usbEndpointMaxPacketSize = ((UsbStatus*)g_usbTransferBuffer)->max_packet_size;
-        if (g_usbEndpointMaxPacketSize != USB_FS_EP_MAX_PACKET_SIZE && g_usbEndpointMaxPacketSize != USB_HS_EP_MAX_PACKET_SIZE && g_usbEndpointMaxPacketSize != USB_SS_EP_MAX_PACKET_SIZE)
+        u16 max_packet_size = ((UsbStatus*)g_usbTransferBuffer)->max_packet_size;
+        if (max_packet_size != USB_FS_EP_MAX_PACKET_SIZE && max_packet_size != USB_HS_EP_MAX_PACKET_SIZE && max_packet_size != USB_SS_EP_MAX_PACKET_SIZE)
         {
-            LOG_MSG_ERROR("Invalid endpoint max packet size value received from USB host: 0x%04X.", g_usbEndpointMaxPacketSize);
+            LOG_MSG_ERROR("Invalid endpoint max packet size value received from USB host: 0x%04X.", max_packet_size);
 
             /* Reset flags. */
             ret = false;
-            g_usbEndpointMaxPacketSize = 0;
+        } else {
+            atomic_store(&g_usbEndpointMaxPacketSize, max_packet_size);
         }
     }
 
@@ -639,9 +724,9 @@ static void usbEndSession(void)
     usbSendCommand();
 }
 
-NX_INLINE void usbPrepareCommandHeader(u32 cmd, u32 cmd_block_size)
+NX_INLINE void usbPrepareCommandHeader(UsbCommandType cmd, u32 cmd_block_size)
 {
-    if (cmd > UsbCommandType_EndSession) return;
+    if (cmd >= UsbCommandType_Count) return;
     UsbCommandHeader *cmd_header = (UsbCommandHeader*)g_usbTransferBuffer;
     memset(cmd_header, 0, sizeof(UsbCommandHeader));
     cmd_header->magic = __builtin_bswap32(USB_CMD_HEADER_MAGIC);
@@ -658,8 +743,13 @@ static bool usbSendCommand(void)
     u32 cmd = cmd_header->cmd;
 #endif
 
+#if LOG_LEVEL <= LOG_LEVEL_INFO
+    UsbCommandHeader cmd_header_bkp = {0};
+    memcpy(&cmd_header_bkp, cmd_header, sizeof(UsbCommandHeader));
+#endif
+
     UsbStatus *cmd_status = (UsbStatus*)g_usbTransferBuffer;
-    u32 status = UsbStatusType_Success;
+    UsbStatusType status = UsbStatusType_Success;
 
     bool ret = false, zlt_required = false, cmd_block_written = false;
 
@@ -673,7 +763,9 @@ static bool usbSendCommand(void)
     /* Write command header first. */
     if (!usbWrite(cmd_header, sizeof(UsbCommandHeader)))
     {
+#if LOG_LEVEL <= LOG_LEVEL_ERROR
         if (!g_usbDetectionThreadExitFlag) LOG_MSG_ERROR("Failed to write header for type 0x%X command!", cmd);
+#endif
         status = UsbStatusType_WriteCommandFailed;
         goto end;
     }
@@ -685,7 +777,7 @@ static bool usbSendCommand(void)
         memmove(g_usbTransferBuffer, g_usbTransferBuffer + sizeof(UsbCommandHeader), cmd_block_size);
 
         /* Determine if we'll need to set a Zero Length Termination (ZLT) packet after sending the command block. */
-        zlt_required = IS_ALIGNED(cmd_block_size, g_usbEndpointMaxPacketSize);
+        zlt_required = IS_ALIGNED(cmd_block_size, atomic_load(&g_usbEndpointMaxPacketSize));
         if (zlt_required) usbSetZltPacket(true);
 
         /* Write command block. */
@@ -723,15 +815,24 @@ static bool usbSendCommand(void)
     ret = ((status = cmd_status->status) == UsbStatusType_Success);
 
 end:
-#if LOG_LEVEL <= LOG_LEVEL_ERROR
-    if (!ret) usbLogStatusDetail(status);
+#if LOG_LEVEL <= LOG_LEVEL_INFO
+    if (!ret)
+    {
+        usbLogStatusDetail(status);
+
+        if (status > UsbStatusType_ReadStatusFailed)
+        {
+            LOG_DATA_INFO(&cmd_header_bkp, sizeof(cmd_header_bkp), "USB command header dump:");
+            if (cmd_block_size) LOG_DATA_INFO(g_usbTransferBuffer, cmd_block_size, "USB command block dump:");
+        }
+    }
 #endif
 
     return ret;
 }
 
 #if LOG_LEVEL <= LOG_LEVEL_INFO
-static void usbLogStatusDetail(u32 status)
+static void usbLogStatusDetail(UsbStatusType status)
 {
     switch(status)
     {
@@ -848,7 +949,7 @@ static bool usbInitializeComms5x(void)
 
     bos_desc->bLength = sizeof(struct usb_bos_descriptor);
     bos_desc->bDescriptorType = USB_DT_BOS;
-    bos_desc->wTotalLength = USB_BOS_SIZE;
+    bos_desc->wTotalLength = sizeof(bos);
     bos_desc->bNumDeviceCaps = 2;   /* USB 2.0 + USB 3.0. No extra capabilities for USB 1.x. */
 
     usb2_ext_desc->bLength = sizeof(struct usb_2_0_extension_descriptor);
@@ -961,7 +1062,7 @@ static bool usbInitializeComms5x(void)
     }
 
     /* Set Binary Object Store. */
-    rc = usbDsSetBinaryObjectStore(bos, USB_BOS_SIZE);
+    rc = usbDsSetBinaryObjectStore(bos, sizeof(bos));
     if (R_FAILED(rc))
     {
         LOG_MSG_ERROR("usbDsSetBinaryObjectStore failed! (0x%X).", rc);

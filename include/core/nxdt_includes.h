@@ -1,7 +1,7 @@
 /*
  * nxdt_includes.h
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -31,6 +31,7 @@
 #include <string.h>
 #include <stddef.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <malloc.h>
 #include <errno.h>
 #include <ctype.h>
@@ -38,6 +39,7 @@
 #include <time.h>
 #include <sys/stat.h>
 #include <sys/param.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <assert.h>
 #include <unistd.h>
@@ -54,6 +56,9 @@
 
 /* Internet operations. */
 #include <arpa/inet.h>
+
+/* Zlib. */
+#include <zlib.h>
 
 /* Global defines. */
 #include "../defines.h"
@@ -73,72 +78,14 @@
 /* SHA3 checksum calculator. */
 #include "sha3.h"
 
-/* LZ4 (dec)compression. */
+/* LZ4 (de)compression. */
 #define LZ4_STATIC_LINKING_ONLY /* Required by LZ4 to enable in-place decompression. */
 #include "lz4.h"
 
-/// Used to store version numbers expressed in dot notation: "{major}.{minor}.{micro}-{major_relstep}.{minor_relstep}".
-/// Used by system version fields. 16-bit long relstep values were used by system version fields prior to HOS 3.0.0.
-typedef struct {
-    union {
-        u32 value;
-        struct {
-            union {
-                u16 relstep;
-                struct {
-                    u16 minor_relstep : 8;
-                    u16 major_relstep : 8;
-                };
-            };
-            u16 micro                 : 4;
-            u16 minor                 : 6;
-            u16 major                 : 6;
-        };
-    };
-} SystemVersion;
+/* Zstandard decompression with BIC support. */
+#include "zbic.h"
 
-NXDT_ASSERT(SystemVersion, 0x4);
-
-/// Used to store version numbers expressed in dot notation: "{release}.{private}".
-/// Used by application version fields.
-typedef struct {
-    union {
-        u32 value;
-        struct {
-            u32 private_ver : 16;
-            u32 release_ver : 16;
-        };
-    };
-} ApplicationVersion;
-
-NXDT_ASSERT(ApplicationVersion, 0x4);
-
-/// Used to store version numbers expressed in dot notation: "{major}.{minor}.{micro}-{relstep}".
-/// Used by SDK version fields.
-typedef struct {
-    union {
-        u32 value;
-        struct {
-            u32 relstep : 8;
-            u32 micro   : 8;
-            u32 minor   : 8;
-            u32 major   : 8;
-        };
-    };
-} SdkAddOnVersion;
-
-NXDT_ASSERT(SdkAddOnVersion, 0x4);
-
-/// Convenient wrapper for all version structs.
-typedef struct {
-    union {
-        u32 value;
-        SystemVersion system_version;
-        ApplicationVersion application_version;
-        SdkAddOnVersion sdk_addon_version;
-    };
-} Version;
-
-NXDT_ASSERT(Version, 0x4);
+/* Horizon OS version structs. */
+#include "hos_version_structs.h"
 
 #endif /* __NXDT_INCLUDES_H__ */

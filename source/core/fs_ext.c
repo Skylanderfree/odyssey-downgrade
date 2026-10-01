@@ -1,7 +1,7 @@
 /*
  * fs_ext.c
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -19,8 +19,8 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
-#include "fs_ext.h"
+#include <core/nxdt_utils.h>
+#include <core/fs_ext.h>
 
 /* IFileSystemProxy. */
 Result fsOpenGameCardStorage(FsStorage *out, const FsGameCardHandle *handle, u32 partition)
@@ -60,35 +60,6 @@ Result fsDeviceOperatorUpdatePartitionInfo(FsDeviceOperator *d, const FsGameCard
 
     if (R_SUCCEEDED(rc) && out_title_version) *out_title_version = out.title_version;
     if (R_SUCCEEDED(rc) && out_title_id) *out_title_id = out.title_id;
-
-    return rc;
-}
-
-Result fsDeviceOperatorGetGameCardDeviceCertificate(FsDeviceOperator *d, const FsGameCardHandle *handle, FsGameCardCertificate *out)
-{
-    const struct {
-        FsGameCardHandle handle;
-        u64 buf_size;
-    } in = { *handle, sizeof(FsGameCardCertificate) };
-
-    Result rc = serviceDispatchIn(&d->s, 206, in,
-        .buffer_attrs = { SfBufferAttr_HipcMapAlias | SfBufferAttr_Out },
-        .buffers = { { out, sizeof(FsGameCardCertificate) } }
-    );
-
-    return rc;
-}
-
-Result fsDeviceOperatorGetGameCardIdSet(FsDeviceOperator *d, FsGameCardIdSet *out)
-{
-    const struct {
-        u64 buf_size;
-    } in = { sizeof(FsGameCardIdSet) };
-
-    Result rc = serviceDispatchIn(&d->s, 208, in,
-        .buffer_attrs = { SfBufferAttr_HipcMapAlias | SfBufferAttr_Out },
-        .buffers = { { out, sizeof(FsGameCardIdSet) } }
-    );
 
     return rc;
 }

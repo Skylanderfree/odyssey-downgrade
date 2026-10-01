@@ -1,7 +1,7 @@
 /*
  * config.h
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -36,18 +36,14 @@ typedef enum {
     ConfigOutputStorage_Count   = 2     ///< Total values supported by this enum.
 } ConfigOutputStorage;
 
-typedef enum {
-    ConfigChecksumLookupMethod_None    = 0,
-    ConfigChecksumLookupMethod_NSWDB   = 1,
-    ConfigChecksumLookupMethod_NoIntro = 2,
-    ConfigChecksumLookupMethod_Count   = 3  ///< Total values supported by this enum.
-} ConfigChecksumLookupMethod;
-
 /// Initializes the configuration interface.
 bool configInitialize(void);
 
 /// Closes the configuration interface.
 void configExit(void);
+
+/// Resets settings to their default values.
+void configResetSettings(void);
 
 /// Getters and setters for various data types.
 /// Path elements must be separated using forward slashes.

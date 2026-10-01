@@ -1,7 +1,7 @@
 /*
  * nca_storage.h
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -30,7 +30,7 @@
 extern "C" {
 #endif
 
-typedef enum {
+typedef enum : u8 {
     NcaStorageBaseStorageType_Invalid    = 0,   ///< Placeholder.
     NcaStorageBaseStorageType_Regular    = 1,
     NcaStorageBaseStorageType_Sparse     = 2,
@@ -41,12 +41,12 @@ typedef enum {
 
 /// Used to perform multi-layered reads within a single NCA FS section.
 typedef struct {
-    u8 base_storage_type;                   ///< NcaStorageBaseStorageType.
-    NcaFsSectionContext *nca_fs_ctx;        ///< NCA FS section context used to initialize this context.
-    BucketTreeContext *sparse_storage;      ///< Sparse storage context.
-    BucketTreeContext *aes_ctr_ex_storage;  ///< AesCtrEx storage context.
-    BucketTreeContext *indirect_storage;    ///< Indirect storage context.
-    BucketTreeContext *compressed_storage;  ///< Compressed storage context.
+    NcaStorageBaseStorageType base_storage_type;
+    NcaFsSectionContext *nca_fs_ctx;                ///< NCA FS section context used to initialize this context.
+    BucketTreeContext *sparse_storage;              ///< Sparse storage context.
+    BucketTreeContext *aes_ctr_ex_storage;          ///< AesCtrEx storage context.
+    BucketTreeContext *indirect_storage;            ///< Indirect storage context.
+    BucketTreeContext *compressed_storage;          ///< Compressed storage context.
 } NcaStorageContext;
 
 /// Initializes a NCA storage context using a NCA FS section context, optionally providing a pointer to a base NcaStorageContext.
@@ -57,7 +57,7 @@ bool ncaStorageInitializeContext(NcaStorageContext *out, NcaFsSectionContext *nc
 /// Retrieves the underlying NCA FS section's hierarchical hash target layer extents. Virtual extents may be returned, depending on the base storage type.
 /// Output offset is relative to the start of the NCA FS section.
 /// Either 'out_offset' or 'out_size' can be NULL, but at least one of them must be a valid pointer.
-bool ncaStorageGetHashTargetExtents(NcaStorageContext *ctx, u64 *out_offset, u64 *out_size);
+bool ncaStorageGetHashTargetExtents(const NcaStorageContext *ctx, u64 *out_offset, u64 *out_size);
 
 /// Reads data from the NCA storage using a previously initialized NcaStorageContext.
 bool ncaStorageRead(NcaStorageContext *ctx, void *out, u64 read_size, u64 offset);
@@ -70,7 +70,7 @@ void ncaStorageFreeContext(NcaStorageContext *ctx);
 
 /// Helper inline functions.
 
-NX_INLINE bool ncaStorageIsValidContext(NcaStorageContext *ctx)
+NX_INLINE bool ncaStorageIsValidContext(const NcaStorageContext *ctx)
 {
     return (ctx && ctx->base_storage_type >= NcaStorageBaseStorageType_Regular && ctx->base_storage_type <= NcaStorageBaseStorageType_Compressed && ctx->nca_fs_ctx && \
             ctx->nca_fs_ctx->enabled);

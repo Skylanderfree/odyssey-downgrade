@@ -1,7 +1,7 @@
 /*
  * nacp.c
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -19,11 +19,13 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
-#include "nacp.h"
-#include "title.h"
+#include <core/nxdt_utils.h>
+#include <core/nacp.h>
+#include <core/title.h>
 
 /* Helper macros. */
+
+#define NACP_TITLE_COMPRESSED_BLOB_ZLIB_WBITS                                                   -15
 
 #define NACP_ADD_FMT_STR_T1(fmt, ...)                                                           utilsAppendFormattedStringToBuffer(&xml_buf, &xml_buf_size, fmt, ##__VA_ARGS__)
 #define NACP_ADD_FMT_STR_T2(fmt, ...)                                                           utilsAppendFormattedStringToBuffer(xml_buf, xml_buf_size, fmt, ##__VA_ARGS__)
@@ -64,7 +66,9 @@ static const char *g_nacpLanguageStrings[NacpLanguage_Count] = {
     "Korean",
     "TraditionalChinese",
     "SimplifiedChinese",
-    "BrazilianPortuguese"
+    "BrazilianPortuguese",
+    "Polish",
+    "Thai"
 };
 
 static const char *g_nacpStartupUserAccountStrings[NacpStartupUserAccount_Count] = {
@@ -186,6 +190,10 @@ static const char *g_nacpRuntimeUpgradeStrings[NacpRuntimeUpgrade_Count] = {
     "Allow"
 };
 
+static const char *g_nacpSupportingLimitedApplicationLicensesStrings[NacpSupportingLimitedApplicationLicenses_Count] = {
+    "Demo"
+};
+
 static const char *g_nacpPlayLogQueryCapabilityStrings[NacpPlayLogQueryCapability_Count] = {
     "None",
     "WhiteList",
@@ -198,6 +206,14 @@ static const char *g_nacpRepairStrings[NacpRepair_Count] = {
 
 static const char *g_nacpRequiredNetworkServiceLicenseOnLaunchStrings[NacpRequiredNetworkServiceLicenseOnLaunch_Count] = {
     "Common"
+};
+
+static const char *g_nacpJitConfigurationFlagStrings[NacpJitConfigurationFlag_Count] = {
+    "IsEnabled"
+};
+
+static const char *g_nacpPlayReportPermissionStrings[NacpPlayReportPermission_Count] = {
+    "TargetMarketing"
 };
 
 static const char *g_nacpCrashScreenshotForProdStrings[NacpCrashScreenshotForProd_Count] = {
@@ -216,7 +232,14 @@ static const char *g_nacpContentsAvailabilityTransitionPolicyStrings[NacpContent
     "Changeable"
 };
 
+static const char *g_nacpAlbumFileExportStrings[NacpAlbumFileExport_Count] = {
+    "Allow",
+    "Deny"
+};
+
 /* Function prototypes. */
+
+static bool nacpDecompressTitleBlock(NacpContext *nacp_ctx);
 
 NX_INLINE bool nacpCheckBitflagField(const void *flag, u8 flag_bitcount, u8 idx);
 
@@ -239,7 +262,7 @@ bool nacpInitializeContext(NacpContext *out, NcaContext *nca_ctx)
 
     const char *language_str = NULL;
     char icon_path[0x80] = {0};
-    RomFileSystemFileEntry *icon_entry = NULL;
+    const RomFileSystemFileEntry *icon_entry = NULL;
     NacpIconContext *tmp_icon_ctx = NULL;
 
     bool success = false;
@@ -261,34 +284,34 @@ bool nacpInitializeContext(NacpContext *out, NcaContext *nca_ctx)
         goto end;
     }
 
-    LOG_MSG_INFO("Found 'control.nacp' entry in Control NCA \"%s\".", nca_ctx->content_id_str);
+    //LOG_MSG_INFO("Found 'control.nacp' entry in Control NCA \"%s\".", nca_ctx->content_id_str);
 
     /* Verify NACP size. */
-    if (out->romfs_file_entry->size != sizeof(_NacpStruct))
+    if (out->romfs_file_entry->size != sizeof(NsApplicationControlProperty))
     {
         LOG_MSG_ERROR("Invalid NACP size!");
         goto end;
     }
 
     /* Allocate memory for the NACP data. */
-    if (!(out->data = malloc(sizeof(_NacpStruct))))
+    if (!(out->data = malloc(sizeof(NsApplicationControlProperty))))
     {
         LOG_MSG_ERROR("Failed to allocate memory for the NACP data!");
         goto end;
     }
 
     /* Read NACP data into memory buffer. */
-    if (!romfsReadFileEntryData(&(out->romfs_ctx), out->romfs_file_entry, out->data, sizeof(_NacpStruct), 0))
+    if (!romfsReadFileEntryData(&(out->romfs_ctx), out->romfs_file_entry, out->data, sizeof(NsApplicationControlProperty), 0))
     {
         LOG_MSG_ERROR("Failed to read NACP data!");
         goto end;
     }
 
     /* Calculate SHA-256 checksum for the whole NACP. */
-    sha256CalculateHash(out->data_hash, out->data, sizeof(_NacpStruct));
+    sha256CalculateHash(out->data_hash, out->data, sizeof(NsApplicationControlProperty));
 
     /* Retrieve NACP icon data. */
-    for(u8 i = 0; i < NacpSupportedLanguage_Count; i++)
+    for(NacpLanguage i = NacpLanguage_AmericanEnglish; i < NacpLanguage_Count; i++)
     {
         NacpIconContext *icon_ctx = NULL;
 
@@ -296,9 +319,9 @@ bool nacpInitializeContext(NacpContext *out, NcaContext *nca_ctx)
         language_str = nacpGetLanguageString(i);
 
         /* Check if the current language is supported. */
-        if (!nacpCheckBitflagField(&(out->data->supported_language), sizeof(out->data->supported_language) * 8, i))
+        if (!nacpCheckBitflagField(&(out->data->supported_language), sizeof(out->data->supported_language) * 8, (u8)i))
         {
-            LOG_MSG_DEBUG("\"%s\" language not supported (flag 0x%08X, index %u).", language_str, out->data->supported_language, i);
+            //LOG_MSG_DEBUG("\"%s\" language not supported (flag 0x%08X, index %u).", language_str, out->data->supported_language, i);
             continue;
         }
 
@@ -308,7 +331,7 @@ bool nacpInitializeContext(NacpContext *out, NcaContext *nca_ctx)
         /* Retrieve RomFS file entry for this icon. */
         if (!(icon_entry = romfsGetFileEntryByPath(&(out->romfs_ctx), icon_path)))
         {
-            LOG_MSG_DEBUG("\"%s\" file entry not found (flag 0x%08X, index %u).", icon_path, out->data->supported_language, i);
+            //LOG_MSG_DEBUG("\"%s\" file entry not found (flag 0x%08X, index %u).", icon_path, out->data->supported_language, i);
             continue;
         }
 
@@ -354,6 +377,13 @@ bool nacpInitializeContext(NacpContext *out, NcaContext *nca_ctx)
         out->icon_count++;
     }
 
+    // Decompress title block.
+    if (!nacpDecompressTitleBlock(out))
+    {
+        LOG_MSG_ERROR("Failed to decompress NACP title block!");
+        goto end;
+    }
+
     /* Update NCA context pointer in output context. */
     out->nca_ctx = nca_ctx;
 
@@ -377,7 +407,7 @@ bool nacpGenerateNcaPatch(NacpContext *nacp_ctx, bool patch_sua, bool patch_scre
         return false;
     }
 
-    _NacpStruct *data = nacp_ctx->data;
+    NsApplicationControlProperty *data = nacp_ctx->data;
     u8 nacp_hash[SHA256_HASH_SIZE] = {0};
 
     /* Check if we're not patching anything. */
@@ -401,7 +431,7 @@ bool nacpGenerateNcaPatch(NacpContext *nacp_ctx, bool patch_sua, bool patch_scre
     if (patch_hdcp) data->hdcp = NacpHdcp_None;
 
     /* Check if we really need to generate this patch. */
-    sha256CalculateHash(nacp_hash, data, sizeof(_NacpStruct));
+    sha256CalculateHash(nacp_hash, data, sizeof(NsApplicationControlProperty));
     if (!memcmp(nacp_hash, nacp_ctx->data_hash, sizeof(nacp_hash)))
     {
         LOG_MSG_INFO("Skipping NACP patching - no flags have changed.");
@@ -409,7 +439,7 @@ bool nacpGenerateNcaPatch(NacpContext *nacp_ctx, bool patch_sua, bool patch_scre
     }
 
     /* Generate RomFS file entry patch. */
-    if (!romfsGenerateFileEntryPatch(&(nacp_ctx->romfs_ctx), nacp_ctx->romfs_file_entry, data, sizeof(_NacpStruct), 0, &(nacp_ctx->nca_patch)))
+    if (!romfsGenerateFileEntryPatch(&(nacp_ctx->romfs_ctx), nacp_ctx->romfs_file_entry, data, sizeof(NsApplicationControlProperty), 0, &(nacp_ctx->nca_patch)))
     {
         LOG_MSG_ERROR("Failed to generate RomFS file entry patch!");
         return false;
@@ -448,7 +478,7 @@ bool nacpGenerateAuthoringToolXml(NacpContext *nacp_ctx, u32 version, u32 requir
         return false;
     }
 
-    _NacpStruct *nacp = nacp_ctx->data;
+    NsApplicationControlProperty *nacp = nacp_ctx->data;
 
     Version app_ver = { .value = version };
 
@@ -480,9 +510,9 @@ bool nacpGenerateAuthoringToolXml(NacpContext *nacp_ctx, u32 version, u32 requir
                              "<Application>\n")) goto end;
 
     /* Title. */
-    for(i = 0, count = 0; i < NacpLanguage_Count; i++)
+    for(i = NacpLanguage_AmericanEnglish, count = 0; i < NacpLanguage_Count; i++)
     {
-        NacpTitle *title = &(nacp->title[i]);
+        NacpTitle *title = &(nacp_ctx->titles[i]);
         if (!*(title->name) || !*(title->publisher)) continue;
 
         if (!NACP_ADD_FMT_STR_T1("  <Title>\n" \
@@ -490,7 +520,7 @@ bool nacpGenerateAuthoringToolXml(NacpContext *nacp_ctx, u32 version, u32 requir
                                  "    <Name>%s</Name>\n" \
                                  "    <Publisher>%s</Publisher>\n" \
                                  "  </Title>\n", \
-                                 nacpGetLanguageString(i), \
+                                 nacpGetLanguageString((NacpLanguage)i), \
                                  title->name, \
                                  title->publisher)) goto end;
 
@@ -534,7 +564,7 @@ bool nacpGenerateAuthoringToolXml(NacpContext *nacp_ctx, u32 version, u32 requir
     if (!NACP_ADD_STR("DisplayVersion", nacp->display_version)) goto end;
 
     /* Rating. */
-    for(i = 0, count = 0; i < NacpRatingAgeOrganization_Count; i++)
+    for(i = NacpRatingAgeOrganization_CERO, count = 0; i < NacpRatingAgeOrganization_Count; i++)
     {
         s8 age = *(((s8*)&(nacp->rating_age)) + i);
         if (age < 0) continue;
@@ -758,7 +788,7 @@ bool nacpGenerateAuthoringToolXml(NacpContext *nacp_ctx, u32 version, u32 requir
                              "    <IsEnabled>%s</IsEnabled>\n" \
                              "    <MemorySize>%lu</MemorySize>\n" \
                              "  </Jit>\n", \
-                             (nacp->jit_configuration.jit_configuration_flag & NacpJitConfigurationFlag_Enabled) ? "true" : "false", \
+                             (nacp->jit_configuration.jit_configuration_flag & NacpJitConfigurationFlag_IsEnabled) ? "true" : "false", \
                              nacp->jit_configuration.memory_size)) goto end;
 
     /* History. */
@@ -857,6 +887,23 @@ bool nacpGenerateAuthoringToolXml(NacpContext *nacp_ctx, u32 version, u32 requir
                              nacpGetRuntimeUpgradeString(nacp->runtime_upgrade), \
                              (nacp->supporting_limited_application_licenses & NacpSupportingLimitedApplicationLicenses_Demo) ? "Demo" : "None")) goto end;
 
+    /* ApplicationErrorCodePrefix. */
+    if (!NACP_ADD_U16("ApplicationErrorCodePrefix", nacp->application_error_code_prefix, false, false)) goto end;
+
+    /* AcdIndex. */
+    if (!NACP_ADD_U16("AcdIndex", nacp->acd_index, false, false)) goto end;
+
+    /* InitialProgramIndex. */
+    /* TODO: find out differences with ProgramIndex and/or if it's actually a different field within the NACP struct. */
+    if (!NACP_ADD_U16("InitialProgramIndex", nacp->program_index, false, false)) goto end;
+
+    /* AlbumFileExport. */
+    if (!NACP_ADD_ENUM("AlbumFileExport", nacp->album_file_export, nacpGetAlbumFileExportString)) goto end;
+
+    /* ApparentPlatform. */
+    /* TODO: make sure this is how it gets written. */
+    if (!NACP_ADD_U16("ApparentPlatform", nacp->apparent_platform, false, false)) goto end;
+
     if (!(success = NACP_ADD_FMT_STR_T1("</Application>"))) goto end;
 
     /* Update NACP context. */
@@ -873,97 +920,97 @@ end:
     return success;
 }
 
-const char *nacpGetLanguageString(u8 language)
+const char *nacpGetLanguageString(NacpLanguage language)
 {
     return (language < NacpLanguage_Count ? g_nacpLanguageStrings[language] : g_unknownString);
 }
 
-const char *nacpGetStartupUserAccountString(u8 startup_user_account)
+const char *nacpGetStartupUserAccountString(NacpStartupUserAccount startup_user_account)
 {
     return (startup_user_account < NacpStartupUserAccount_Count ? g_nacpStartupUserAccountStrings[startup_user_account] : g_unknownString);
 }
 
-const char *nacpGetUserAccountSwitchLockString(u8 user_account_switch_lock)
+const char *nacpGetUserAccountSwitchLockString(NacpUserAccountSwitchLock user_account_switch_lock)
 {
     return (user_account_switch_lock < NacpUserAccountSwitchLock_Count ? g_nacpUserAccountSwitchLockStrings[user_account_switch_lock] : g_unknownString);
 }
 
-const char *nacpGetAddOnContentRegistrationTypeString(u8 add_on_content_registration_type)
+const char *nacpGetAddOnContentRegistrationTypeString(NacpAddOnContentRegistrationType add_on_content_registration_type)
 {
     return (add_on_content_registration_type < NacpAddOnContentRegistrationType_Count ? g_nacpAddOnContentRegistrationTypeStrings[add_on_content_registration_type] : g_unknownString);
 }
 
 const char *nacpGetAttributeString(u8 attribute)
 {
-    return (attribute < NacpAttribute_Count ? g_nacpAttributeStrings[attribute] : g_unknownString);
+    return (attribute < (u8)NacpAttribute_Count ? g_nacpAttributeStrings[attribute] : g_unknownString);
 }
 
 const char *nacpGetParentalControlString(u8 parental_control)
 {
-    return (parental_control < NacpParentalControl_Count ? g_nacpParentalControlStrings[parental_control] : g_unknownString);
+    return (parental_control < (u8)NacpParentalControl_Count ? g_nacpParentalControlStrings[parental_control] : g_unknownString);
 }
 
-const char *nacpGetScreenshotString(u8 screenshot)
+const char *nacpGetScreenshotString(NacpScreenshot screenshot)
 {
     return (screenshot < NacpScreenshot_Count ? g_nacpScreenshotStrings[screenshot] : g_unknownString);
 }
 
-const char *nacpGetVideoCaptureString(u8 video_capture)
+const char *nacpGetVideoCaptureString(NacpVideoCapture video_capture)
 {
     return (video_capture < NacpVideoCapture_Count ? g_nacpVideoCaptureStrings[video_capture] : g_unknownString);
 }
 
-const char *nacpGetDataLossConfirmationString(u8 data_loss_confirmation)
+const char *nacpGetDataLossConfirmationString(NacpDataLossConfirmation data_loss_confirmation)
 {
     return (data_loss_confirmation < NacpDataLossConfirmation_Count ? g_nacpDataLossConfirmationStrings[data_loss_confirmation] : g_unknownString);
 }
 
-const char *nacpGetPlayLogPolicyString(u8 play_log_policy)
+const char *nacpGetPlayLogPolicyString(NacpPlayLogPolicy play_log_policy)
 {
     return (play_log_policy < NacpPlayLogPolicy_Count ? g_nacpPlayLogPolicyStrings[play_log_policy] : g_unknownString);
 }
 
-const char *nacpGetRatingAgeOrganizationString(u8 rating_age_organization)
+const char *nacpGetRatingAgeOrganizationString(NacpRatingAgeOrganization rating_age_organization)
 {
     return (rating_age_organization < NacpRatingAgeOrganization_Count ? g_nacpRatingAgeOrganizationStrings[rating_age_organization] : g_unknownString);
 }
 
-const char *nacpGetLogoTypeString(u8 logo_type)
+const char *nacpGetLogoTypeString(NacpLogoType logo_type)
 {
     return (logo_type < NacpLogoType_Count ? g_nacpLogoTypeStrings[logo_type] : g_unknownString);
 }
 
-const char *nacpGetLogoHandlingString(u8 logo_handling)
+const char *nacpGetLogoHandlingString(NacpLogoHandling logo_handling)
 {
     return (logo_handling < NacpLogoHandling_Count ? g_nacpLogoHandlingStrings[logo_handling] : g_unknownString);
 }
 
-const char *nacpGetRuntimeAddOnContentInstallString(u8 runtime_add_on_content_install)
+const char *nacpGetRuntimeAddOnContentInstallString(NacpRuntimeAddOnContentInstall runtime_add_on_content_install)
 {
     return (runtime_add_on_content_install < NacpRuntimeAddOnContentInstall_Count ? g_nacpRuntimeAddOnContentInstallStrings[runtime_add_on_content_install] : g_unknownString);
 }
 
-const char *nacpGetRuntimeParameterDeliveryString(u8 runtime_parameter_delivery)
+const char *nacpGetRuntimeParameterDeliveryString(NacpRuntimeParameterDelivery runtime_parameter_delivery)
 {
     return (runtime_parameter_delivery < NacpRuntimeParameterDelivery_Count ? g_nacpRuntimeParameterDeliveryStrings[runtime_parameter_delivery] : g_unknownString);
 }
 
-const char *nacpGetAppropriateAgeForChina(u8 appropriate_age_for_china)
+const char *nacpGetAppropriateAgeForChina(NacpAppropriateAgeForChina appropriate_age_for_china)
 {
     return (appropriate_age_for_china < NacpAppropriateAgeForChina_Count ? g_nacpAppropriateAgeForChinaStrings[appropriate_age_for_china] : g_unknownString);
 }
 
-const char *nacpGetUndecidedParameter75b8bString(u8 undecided_parameter_75b8b)
+const char *nacpGetUndecidedParameter75b8bString(NacpUndecidedParameter75b8b undecided_parameter_75b8b)
 {
     return (undecided_parameter_75b8b < NacpUndecidedParameter75b8b_Count ? g_nacpUndecidedParameter75b8bStrings[undecided_parameter_75b8b] : g_unknownString);
 }
 
-const char *nacpGetCrashReportString(u8 crash_report)
+const char *nacpGetCrashReportString(NacpCrashReport crash_report)
 {
     return (crash_report < NacpCrashReport_Count ? g_nacpCrashReportStrings[crash_report] : g_unknownString);
 }
 
-const char *nacpGetHdcpString(u8 hdcp)
+const char *nacpGetHdcpString(NacpHdcp hdcp)
 {
     return (hdcp < NacpHdcp_Count ? g_nacpHdcpStrings[hdcp] : g_unknownString);
 }
@@ -973,12 +1020,18 @@ const char *nacpGetStartupUserAccountOptionString(u8 startup_user_account_option
     return (startup_user_account_option < NacpStartupUserAccountOption_Count ? g_nacpStartupUserAccountOptionStrings[startup_user_account_option] : g_unknownString);
 }
 
-const char *nacpGetRuntimeUpgradeString(u8 runtime_upgrade)
+const char *nacpGetRuntimeUpgradeString(NacpRuntimeUpgrade runtime_upgrade)
 {
     return (runtime_upgrade < NacpRuntimeUpgrade_Count ? g_nacpRuntimeUpgradeStrings[runtime_upgrade] : g_unknownString);
 }
 
-const char *nacpGetPlayLogQueryCapabilityString(u8 play_log_query_capability)
+const char *nacpGetSupportingLimitedApplicationLicensesString(u8 supporting_limited_application_licenses)
+{
+    return (supporting_limited_application_licenses < (u8)NacpSupportingLimitedApplicationLicenses_Count ? \
+            g_nacpSupportingLimitedApplicationLicensesStrings[supporting_limited_application_licenses] : g_unknownString);
+}
+
+const char *nacpGetPlayLogQueryCapabilityString(NacpPlayLogQueryCapability play_log_query_capability)
 {
     return (play_log_query_capability < NacpPlayLogQueryCapability_Count ? g_nacpPlayLogQueryCapabilityStrings[play_log_query_capability] : g_unknownString);
 }
@@ -994,20 +1047,106 @@ const char *nacpGetRequiredNetworkServiceLicenseOnLaunchString(u8 required_netwo
             g_nacpRequiredNetworkServiceLicenseOnLaunchStrings[required_network_service_license_on_launch] : g_unknownString);
 }
 
-const char *nacpGetCrashScreenshotForProdString(u8 crash_screenshot_for_prod)
+const char *nacpGetJitConfigurationFlagString(u8 jit_configuration_flag)
+{
+    return (jit_configuration_flag < (u8)NacpJitConfigurationFlag_Count ? g_nacpJitConfigurationFlagStrings[jit_configuration_flag] : g_unknownString);
+}
+
+const char *nacpGetPlayReportPermissionString(u8 play_report_permission)
+{
+    return (play_report_permission < NacpPlayReportPermission_Count ? g_nacpPlayReportPermissionStrings[play_report_permission] : g_unknownString);
+}
+
+const char *nacpGetCrashScreenshotForProdString(NacpCrashScreenshotForProd crash_screenshot_for_prod)
 {
     return (crash_screenshot_for_prod < NacpCrashScreenshotForProd_Count ? g_nacpCrashScreenshotForProdStrings[crash_screenshot_for_prod] : g_unknownString);
 }
 
-const char *nacpGetCrashScreenshotForDevString(u8 crash_screenshot_for_dev)
+const char *nacpGetCrashScreenshotForDevString(NacpCrashScreenshotForDev crash_screenshot_for_dev)
 {
     return (crash_screenshot_for_dev < NacpCrashScreenshotForDev_Count ? g_nacpCrashScreenshotForDevStrings[crash_screenshot_for_dev] : g_unknownString);
 }
 
-const char *nacpGetContentsAvailabilityTransitionPolicyString(u8 contents_availability_transition_policy)
+const char *nacpGetContentsAvailabilityTransitionPolicyString(NacpContentsAvailabilityTransitionPolicy contents_availability_transition_policy)
 {
     return (contents_availability_transition_policy < NacpContentsAvailabilityTransitionPolicy_Count ? \
             g_nacpContentsAvailabilityTransitionPolicyStrings[contents_availability_transition_policy] : g_unknownString);
+}
+
+const char *nacpGetAlbumFileExportString(NacpAlbumFileExport album_file_export)
+{
+    return (album_file_export < NacpAlbumFileExport_Count ? g_nacpAlbumFileExportStrings[album_file_export] : g_unknownString);
+}
+
+static bool nacpDecompressTitleBlock(NacpContext *nacp_ctx)
+{
+    if (!nacp_ctx)
+    {
+        LOG_MSG_ERROR("Invalid parameters!");
+        return false;
+    }
+
+    const NacpTitleFormat1 *compressed_title = &(nacp_ctx->data->title_block.format1);
+    const bool is_compressed = (nacp_ctx->data->titles_data_format == NacpTitlesDataFormat_Format1);
+    const size_t title_block_size = (sizeof(NacpTitle) * (u32)NacpLanguage_Format1EntryCount);
+
+    z_stream zstrm = {0};
+    int ret = Z_OK;
+
+    bool success = false;
+
+    /* Allocate buffer for our decompressed title entries. */
+    if (!(nacp_ctx->titles = calloc(1, title_block_size)))
+    {
+        LOG_MSG_ERROR("Failed to allocate memory for decompressed title block!");
+        goto end;
+    }
+
+    /* Short-circuit: copy the uncompressed title entries to our allocated buffer if we're not dealing with any compression. */
+    if (!is_compressed)
+    {
+        memcpy(nacp_ctx->titles, nacp_ctx->data->title_block.format0, sizeof(nacp_ctx->data->title_block.format0));
+        success = true;
+        goto end;
+    }
+
+    LOG_DATA_DEBUG(compressed_title, title_block_size, "Decompressing title block for %016lX (size 0x%lX):", nacp_ctx->data->save_data_owner_id, title_block_size);
+
+    /* Setup zlib stream settings. */
+    zstrm.next_in = (z_const Bytef*)compressed_title->data;
+    zstrm.avail_in = (uInt)compressed_title->data_size;
+    zstrm.next_out = (Bytef*)nacp_ctx->titles;
+    zstrm.avail_out = (uInt)title_block_size;
+
+    /* Decompress zlib stream. */
+    ret = inflateInit2(&zstrm, NACP_TITLE_COMPRESSED_BLOB_ZLIB_WBITS);
+    if (ret != Z_OK)
+    {
+        LOG_MSG_ERROR("inflateInit2() failed! (%d) (%s).", ret, zstrm.msg);
+        goto end;
+    }
+
+    ret = inflate(&zstrm, Z_FINISH);
+    if (ret != Z_STREAM_END)
+    {
+        LOG_MSG_ERROR("inflate() failed! (%d) (%s).", ret, zstrm.msg);
+        goto end;
+    }
+
+    ret = inflateEnd(&zstrm);
+    if (ret != Z_OK) LOG_MSG_ERROR("inflateEnd() failed! (%d) (%s).", ret, zstrm.msg);
+
+    /* Update flag. */
+    success = true;
+
+end:
+    if (!success && nacp_ctx->titles)
+    {
+        free(nacp_ctx->titles);
+        nacp_ctx->titles = NULL;
+    }
+
+    return success;
 }
 
 NX_INLINE bool nacpCheckBitflagField(const void *flag, u8 flag_bitcount, u8 idx)

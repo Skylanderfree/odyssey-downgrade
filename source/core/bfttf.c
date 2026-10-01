@@ -2,7 +2,7 @@
  * bfttf.c
  *
  * Copyright (c) 2018, simontime.
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -20,10 +20,10 @@
  * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
-#include "nxdt_utils.h"
-#include "bfttf.h"
-#include "romfs.h"
-#include "title.h"
+#include <core/nxdt_utils.h>
+#include <core/bfttf.h>
+#include <core/romfs.h>
+#include <core/title.h>
 
 /* Type definitions. */
 
@@ -82,7 +82,7 @@ bool bfttfInitialize(void)
         for(u32 i = 0; i < g_fontInfoCount; i++)
         {
             BfttfFontInfo *font_info = &(g_fontInfo[i]);
-            RomFileSystemFileEntry *romfs_file_entry = NULL;
+            const RomFileSystemFileEntry *romfs_file_entry = NULL;
 
             /* Check if the title ID for the current font container matches the one from the previous font container. */
             /* We won't have to reinitialize both NCA and RomFS contexts if that's the case. */
@@ -91,7 +91,7 @@ bool bfttfInitialize(void)
                 TitleInfo *title_info = NULL;
 
                 /* Get title info. */
-                if (!(title_info = titleGetInfoFromStorageByTitleId(NcmStorageId_BuiltInSystem, font_info->title_id)))
+                if (!(title_info = titleGetTitleInfoEntryFromStorageByTitleId(NcmStorageId_BuiltInSystem, font_info->title_id)))
                 {
                     LOG_MSG_ERROR("Failed to get title info for %016lX!", font_info->title_id);
                     continue;
@@ -100,8 +100,8 @@ bool bfttfInitialize(void)
                 /* Initialize NCA context. */
                 /* NCA contexts don't need to be freed beforehand. */
                 /* Don't allow invalid NCA signatures. */
-                bool nca_ctx_init = (ncaInitializeContext(nca_ctx, NcmStorageId_BuiltInSystem, 0, &(title_info->meta_key), \
-                                                          titleGetContentInfoByTypeAndIdOffset(title_info, NcmContentType_Data, 0), NULL) && nca_ctx->valid_main_signature);
+                NcmContentInfo *content_info = titleGetContentInfoByTypeAndIdOffset(title_info, NcmContentType_Data, 0);
+                bool nca_ctx_init = (NCA_INIT_CTX(nca_ctx, NcmStorageId_BuiltInSystem, &(title_info->meta_key), content_info, NULL) && nca_ctx->valid_main_signature);
 
                 /* Free title info. */
                 titleFreeTitleInfo(&title_info);
@@ -206,7 +206,7 @@ void bfttfExit(void)
     }
 }
 
-bool bfttfGetFontByType(BfttfFontData *font_data, u8 font_type)
+bool bfttfGetFontByType(BfttfFontData *font_data, BfttfFontType font_type)
 {
     if (!font_data || font_type >= BfttfFontType_Count)
     {

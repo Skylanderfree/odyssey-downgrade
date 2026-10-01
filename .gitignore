@@ -1,9 +1,8 @@
 .vscode
-/build/
+build
 host/__pycache__
-host/installer
-host/build
-host/dist
+host/standalone
+host/nxdt_host*
 host/nxdumptool
 *.elf
 *.nacp
@@ -15,9 +14,15 @@ host/nxdumptool
 *.log
 *.spec
 *.exe
+*.7z
 *.code-workspace
+*.csv
+*.bin
+*.tik
 
 # TODO: remove this after the PoC builds are no longer needed.
 main.cpp
 /code_templates/tmp/*
-/out/
+
+# macOS
+*.DS_Store

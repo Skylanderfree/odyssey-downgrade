@@ -1,7 +1,7 @@
 /*
  * nxdt_utils.c
  *
- * Copyright (c) 2020-2023, DarkMatterCore <pabloacurielz@gmail.com>.
+ * Copyright (c) 2020-2026, DarkMatterCore <pabloacurielz@gmail.com>.
  *
  * This file is part of nxdumptool (https://github.com/DarkMatterCore/nxdumptool).
  *
@@ -21,24 +21,31 @@
 
 #include <sys/statvfs.h>
 
-#include "nxdt_utils.h"
-#include "keys.h"
-#include "gamecard.h"
-#include "services.h"
-#include "nca.h"
-#include "usb.h"
-#include "title.h"
-#include "bfttf.h"
-#include "nxdt_bfsar.h"
-#include "fatfs/ff.h"
-
-/// Reference: https://docs.microsoft.com/en-us/windows/win32/fileio/filesystem-functionality-comparison#limits.
-/// Reference: https://en.wikipedia.org/wiki/Comparison_of_file_systems#Limits.
-/// Most modern filesystems use a 255-byte limit instead of 255-character/codepoint limit, so that's what we're gonna use.
-#define FS_MAX_FILENAME_LENGTH      255
-#define SDMC_MAX_FILENAME_LENGTH    128 /* Arbitrarily set, I'm tired of FS sysmodule shenanigans. */
+#include <core/nxdt_utils.h>
+#include <core/keys.h>
+#include <core/gamecard.h>
+#include <core/services.h>
+#include <core/nca.h>
+#include <core/usb.h>
+#include <core/title.h>
+#include <core/bfttf.h>
+#include <core/nxdt_bfsar.h>
+#include <core/system_update.h>
+#include <core/devoptab/nxdt_devoptab.h>
+#include <core/bis_storage.h>
 
 /* Type definitions. */
+
+/// Reference: https://github.com/Atmosphere-NX/Atmosphere/blob/master/exosphere/program/source/smc/secmon_smc_info.cpp.
+typedef struct {
+    SdkAddOnVersion target_firmware;
+    u8 key_generation;
+    u8 ams_ver_micro;
+    u8 ams_ver_minor;
+    u8 ams_ver_major;
+} UtilsExosphereApiVersion;
+
+NXDT_ASSERT(UtilsExosphereApiVersion, 0x8);
 
 typedef struct {
     u32 major;
@@ -47,6 +54,9 @@ typedef struct {
 } UtilsApplicationVersion;
 
 /* Global variables. */
+
+extern int __system_argc;
+extern char **__system_argv;
 
 static bool g_resourcesInit = false;
 static Mutex g_resourcesMutex = 0;
@@ -57,16 +67,13 @@ static FsFileSystem *g_sdCardFileSystem = NULL;
 
 static int g_nxLinkSocketFd = -1;
 
-static u8 g_customFirmwareType = UtilsCustomFirmwareType_Unknown;
+static UtilsCustomFirmwareType g_customFirmwareType = UtilsCustomFirmwareType_Unknown;
 
 static u8 g_productModel = SetSysProductModel_Invalid;
 
-static bool g_isDevUnit = false;
+static bool g_isTerraUnit = false, g_isDevUnit = false;
 
 static AppletType g_programAppletType = AppletType_None;
-
-static FsStorage g_emmcBisSystemPartitionStorage = {0};
-static FATFS *g_emmcBisSystemPartitionFatFsObj = NULL;
 
 static AppletHookCookie g_systemOverclockCookie = {0};
 
@@ -78,33 +85,43 @@ static const u32 g_sizeSuffixesCount = MAX_ELEMENTS(g_sizeSuffixes);
 static const char g_illegalFileSystemChars[] = "\\/:*?\"<>|";
 static const size_t g_illegalFileSystemCharsLength = (MAX_ELEMENTS(g_illegalFileSystemChars) - 1);
 
-static const char *g_outputDirs[] = {
-    HBMENU_BASE_PATH,
-    APP_BASE_PATH,
-    GAMECARD_PATH,
-    HFS_PATH,
-    NSP_PATH,
-    TICKET_PATH,
-    NCA_PATH,
-    NCA_FS_PATH
-};
-
-static const size_t g_outputDirsCount = MAX_ELEMENTS(g_outputDirs);
-
 static bool g_appUpdated = false;
+
+static const SplConfigItem SplConfigItem_ExosphereApiVersion = (SplConfigItem)65000;
+static const SplConfigItem SplConfigItem_ExosphereEmummcType = (SplConfigItem)65007;
+
+static UtilsExosphereApiVersion g_exosphereApiVersion = {0};
+static bool g_exosphereIsEmummc = false;
 
 /* Function prototypes. */
 
-static void _utilsGetLaunchPath(int program_argc, const char **program_argv);
+static void _utilsGetLaunchPath(void);
+
+static bool _utilsGetSdCardFileSystemObject(void);
+
+static void _utilsGetNxLinkFileDescriptor(void);
+static void utilsCloseNxLinkFileDescriptor(void);
+
+static bool utilsGetExosphereApiVersion(void);
+static bool utilsGetExosphereEmummcType(void);
 
 static void _utilsGetCustomFirmwareType(void);
 
 static bool _utilsGetProductModel(void);
 
-static bool _utilsIsDevelopmentUnit(void);
+static bool utilsGetDevelopmentUnitFlag(void);
 
-static bool utilsMountEmmcBisSystemPartitionStorage(void);
-static void utilsUnmountEmmcBisSystemPartitionStorage(void);
+static bool utilsGetTerraUnitFlag(void);
+
+#if LOG_LEVEL <= LOG_LEVEL_INFO
+static void utilsLogEnvironmentInfo(void);
+#endif
+
+static bool utilsEnsureCorrectLaunchPath(void);
+
+static void utilsEnableVideoRecording(void);
+
+static void utilsPrintInitializationFailureMessage(void);
 
 static void utilsOverclockSystem(bool overclock);
 static void utilsOverclockSystemAppletHook(AppletHookType hook, void *param);
@@ -115,7 +132,7 @@ static size_t utilsGetUtf8StringLimit(const char *str, size_t str_size, size_t b
 
 static char utilsConvertHexDigitToBinary(char c);
 
-bool utilsInitializeResources(const int program_argc, const char **program_argv)
+bool utilsInitializeResources(void)
 {
     Result rc = 0;
     bool ret = false;
@@ -129,65 +146,56 @@ bool utilsInitializeResources(const int program_argc, const char **program_argv)
         appletLockExit();
 
         /* Retrieve pointer to the application launch path. */
-        _utilsGetLaunchPath(program_argc, program_argv);
+        _utilsGetLaunchPath();
 
-        /* Retrieve pointer to the SD card FsFileSystem element. */
-        if (!(g_sdCardFileSystem = fsdevGetDeviceFileSystem(DEVOPTAB_SDMC_DEVICE)))
-        {
-            LOG_MSG_ERROR("Failed to retrieve FsFileSystem object for the SD card!");
-            break;
-        }
+        /* Retrieve pointer to the SD card's FsFileSystem service object. */
+        if (!_utilsGetSdCardFileSystemObject()) break;
+
+        LOG_MSG_INFO(APP_TITLE " v" APP_VERSION " starting (" GIT_REV "). Built on " BUILD_TIMESTAMP ".");
 
         /* Initialize needed services. */
         if (!servicesInitialize()) break;
 
-        /* Check if a valid nxlink host IP address was set by libnx. */
-        /* If so, initialize nxlink connection without redirecting stdout and/or stderr. */
-        if (__nxlink_host.s_addr != 0 && __nxlink_host.s_addr != INADDR_NONE) g_nxLinkSocketFd = nxlinkConnectToHost(false, false);
+        /* Get nxlink file descriptor. */
+        /* If available, it will be used by our logging interface. */
+        _utilsGetNxLinkFileDescriptor();
 
-#if LOG_LEVEL <= LOG_LEVEL_INFO
-        /* Log info messages. */
-        u32 hos_version = hosversionGet();
-        LOG_MSG_INFO(APP_TITLE " v" APP_VERSION " starting (" GIT_REV "). Built on " BUILD_TIMESTAMP ".");
-        if (g_nxLinkSocketFd >= 0) LOG_MSG_INFO("nxlink enabled! Host IP address: %s.", inet_ntoa(__nxlink_host));
-        LOG_MSG_INFO("Horizon OS version: %u.%u.%u.", HOSVER_MAJOR(hos_version), HOSVER_MINOR(hos_version), HOSVER_MICRO(hos_version));
-#endif
+        /* Retrieve Exosphère API version. */
+        if (!utilsGetExosphereApiVersion())
+        {
+            LOG_MSG_ERROR("Failed to retrieve Exosphère API version!");
+            break;
+        }
+
+        /* Retrieve Exosphère emuMMC status. */
+        if (!utilsGetExosphereEmummcType())
+        {
+            LOG_MSG_ERROR("Failed to retrieve Exosphère emuMMC status!");
+            break;
+        }
 
         /* Retrieve custom firmware type. */
         _utilsGetCustomFirmwareType();
-        if (g_customFirmwareType != UtilsCustomFirmwareType_Unknown) LOG_MSG_INFO("Detected %s CFW.", (g_customFirmwareType == UtilsCustomFirmwareType_Atmosphere ? "Atmosphère" : \
-                                                                                  (g_customFirmwareType == UtilsCustomFirmwareType_SXOS ? "SX OS" : "ReiNX")));
 
         /* Get product model. */
         if (!_utilsGetProductModel()) break;
 
         /* Get development unit flag. */
-        if (!_utilsIsDevelopmentUnit()) break;
+        if (!utilsGetDevelopmentUnitFlag()) break;
+
+        /* Get Terra unit flag. */
+        if (!utilsGetTerraUnitFlag()) break;
 
         /* Get applet type. */
         g_programAppletType = appletGetAppletType();
 
-        LOG_MSG_INFO("Running under %s %s unit in %s mode.", g_isDevUnit ? "development" : "retail", utilsIsMarikoUnit() ? "Mariko" : "Erista", utilsIsAppletMode() ? "applet" : "title override");
+#if LOG_LEVEL <= LOG_LEVEL_INFO
+        /* Log environment information. */
+        utilsLogEnvironmentInfo();
+#endif
 
-        /* Create output directories (SD card only). */
-        /* TODO: remove the APP_TITLE check whenever we're ready for a release. */
-        if (!strcasecmp(APP_TITLE, "nxdumptool")) utilsCreateOutputDirectories(NULL);
-
-        if (g_appLaunchPath)
-        {
-            LOG_MSG_INFO("Launch path: \"%s\".", g_appLaunchPath);
-
-            /* Move NRO if the launch path isn't the right one, then return. */
-            /* TODO: uncomment this block whenever we are ready for a release. */
-            /*if (strcmp(g_appLaunchPath, NRO_PATH) != 0)
-            {
-                remove(NRO_PATH);
-                rename(g_appLaunchPath, NRO_PATH);
-
-                LOG_MSG_INFO("Moved NRO to \"%s\". Please reload the application.", NRO_PATH);
-                break;
-            }*/
-        }
+        /* Make sure the right launch path is being used. */
+        if (!utilsEnsureCorrectLaunchPath()) break;
 
         /* Initialize HTTP interface. */
         /* cURL must be initialized before starting any other threads. */
@@ -200,11 +208,7 @@ bool utilsInitializeResources(const int program_argc, const char **program_argv)
         if (!umsInitialize()) break;
 
         /* Load keyset. */
-        if (!keysLoadKeyset())
-        {
-            LOG_MSG_ERROR("Failed to load keyset!\nUpdate your keys file with Lockpick_RCM:\n" LOCKPICK_RCM_URL);
-            break;
-        }
+        if (!keysLoadKeyset()) break;
 
         /* Allocate NCA crypto buffer. */
         if (!ncaAllocateCryptoBuffer())
@@ -225,14 +229,14 @@ bool utilsInitializeResources(const int program_argc, const char **program_argv)
         /* Initialize BFSAR interface. */
         //if (!bfsarInitialize()) break;
 
-        /* Mount eMMC BIS System partition. */
-        if (!utilsMountEmmcBisSystemPartitionStorage()) break;
+        /* Initialize system update interface. */
+        if (!systemUpdateInitialize()) break;
 
         /* Mount application RomFS. */
         rc = romfsInit();
         if (R_FAILED(rc))
         {
-            LOG_MSG_ERROR("Failed to mount " APP_TITLE "'s RomFS container!");
+            LOG_MSG_ERROR("Failed to mount " APP_TITLE "'s RomFS container! (0x%X).", rc);
             break;
         }
 
@@ -242,45 +246,18 @@ bool utilsInitializeResources(const int program_argc, const char **program_argv)
         /* Setup an applet hook to change the hardware clocks after a system mode change (docked <-> undocked). */
         appletHook(&g_systemOverclockCookie, utilsOverclockSystemAppletHook, NULL);
 
-        /* Enable video recording if we're running under title override mode. */
-        if (!utilsIsAppletMode())
-        {
-            bool flag = false;
-            rc = appletIsGamePlayRecordingSupported(&flag);
-            if (R_SUCCEEDED(rc) && flag)
-            {
-                rc = appletInitializeGamePlayRecording();
-                if (R_FAILED(rc)) LOG_MSG_ERROR("appletInitializeGamePlayRecording failed! (0x%X).", rc);
-            } else {
-                LOG_MSG_ERROR("appletIsGamePlayRecordingSupported returned [0x%X, %u].", rc, flag);
-            }
-        }
+        /* Initialize eMMC BIS storage interface. */
+        if (!bisStorageInitialize()) break;
+
+        /* Enable video recording whenever possible. */
+        utilsEnableVideoRecording();
 
         /* Update flags. */
         ret = g_resourcesInit = true;
     }
 
-    if (!ret)
-    {
-        char *msg = NULL;
-        size_t msg_size = 0;
-
-        /* Generate error message. */
-        utilsAppendFormattedStringToBuffer(&msg, &msg_size, "An error occurred while initializing resources.");
-
-#if LOG_LEVEL <= LOG_LEVEL_ERROR
-        /* Get last log message. */
-        char log_msg[0x100] = {0};
-        logGetLastMessage(log_msg, sizeof(log_msg));
-        if (*log_msg) utilsAppendFormattedStringToBuffer(&msg, &msg_size, "\n\n%s", log_msg);
-#endif
-
-        /* Print error message. */
-        utilsPrintConsoleError(msg);
-
-        /* Free error message. */
-        if (msg) free(msg);
-    }
+    /* Print error message, if applicable. */
+    if (!ret) utilsPrintInitializationFailureMessage();
 
     return ret;
 }
@@ -289,6 +266,14 @@ void utilsCloseResources(void)
 {
     SCOPED_LOCK(&g_resourcesMutex)
     {
+        LOG_MSG_INFO("Shutting down...");
+
+        /* Close eMMC BIS storage interface. */
+        bisStorageExit();
+
+        /* Unmount all custom devoptab devices. */
+        devoptabUnmountAllDevices();
+
         /* Unset long running process state. */
         utilsSetLongRunningProcessState(false);
 
@@ -301,8 +286,8 @@ void utilsCloseResources(void)
         /* Unmount application RomFS. */
         romfsExit();
 
-        /* Unmount eMMC BIS System partition. */
-        utilsUnmountEmmcBisSystemPartitionStorage();
+        /* Deinitialize system update interface. */
+        systemUpdateExit();
 
         /* Deinitialize BFSAR interface. */
         //bfsarExit();
@@ -329,27 +314,21 @@ void utilsCloseResources(void)
         httpExit();
 
         /* Close nxlink socket. */
-        if (g_nxLinkSocketFd >= 0)
-        {
-            close(g_nxLinkSocketFd);
-            g_nxLinkSocketFd = -1;
-        }
+        utilsCloseNxLinkFileDescriptor();
 
         /* Close initialized services. */
         servicesClose();
 
         /* Replace application NRO (if needed). */
         /* TODO: uncomment this block whenever we're ready for a release. */
-        /*if (g_appUpdated)
+        /*if (g_resourcesInit && g_appUpdated)
         {
             remove(NRO_PATH);
             rename(NRO_TMP_PATH, NRO_PATH);
         }*/
 
-#if LOG_LEVEL <= LOG_LEVEL_ERROR
         /* Close logfile. */
         logCloseLogFile();
-#endif
 
         /* Unlock applet exit. */
         appletUnlockExit();
@@ -363,14 +342,14 @@ const char *utilsGetLaunchPath(void)
     return g_appLaunchPath;
 }
 
-int utilsGetNxLinkFileDescriptor(void)
-{
-    return g_nxLinkSocketFd;
-}
-
 FsFileSystem *utilsGetSdCardFileSystemObject(void)
 {
     return g_sdCardFileSystem;
+}
+
+int utilsGetNxLinkFileDescriptor(void)
+{
+    return g_nxLinkSocketFd;
 }
 
 bool utilsCommitSdCardFileSystemChanges(void)
@@ -378,7 +357,27 @@ bool utilsCommitSdCardFileSystemChanges(void)
     return (g_sdCardFileSystem ? R_SUCCEEDED(fsFsCommit(g_sdCardFileSystem)) : false);
 }
 
-u8 utilsGetCustomFirmwareType(void)
+u32 utilsGetAtmosphereVersion(void)
+{
+    return MAKEHOSVERSION(g_exosphereApiVersion.ams_ver_major, g_exosphereApiVersion.ams_ver_minor, g_exosphereApiVersion.ams_ver_micro);
+}
+
+u8 utilsGetAtmosphereKeyGeneration(void)
+{
+    return g_exosphereApiVersion.key_generation;
+}
+
+void utilsGetAtmosphereTargetFirmware(SdkAddOnVersion *out)
+{
+    memcpy(out, &(g_exosphereApiVersion.target_firmware), sizeof(SdkAddOnVersion));
+}
+
+bool utilsGetAtmosphereEmummcStatus(void)
+{
+    return g_exosphereIsEmummc;
+}
+
+UtilsCustomFirmwareType utilsGetCustomFirmwareType(void)
 {
     return g_customFirmwareType;
 }
@@ -393,14 +392,14 @@ bool utilsIsDevelopmentUnit(void)
     return g_isDevUnit;
 }
 
+bool utilsIsTerraUnit(void)
+{
+    return g_isTerraUnit;
+}
+
 bool utilsIsAppletMode(void)
 {
     return (g_programAppletType > AppletType_Application && g_programAppletType < AppletType_SystemApplication);
-}
-
-FsStorage *utilsGetEmmcBisSystemPartitionStorage(void)
-{
-    return &g_emmcBisSystemPartitionStorage;
 }
 
 void utilsSetLongRunningProcessState(bool state)
@@ -587,18 +586,25 @@ void utilsReplaceIllegalCharacters(char *str, bool ascii_only)
     u8 *ptr1 = (u8*)str, *ptr2 = ptr1;
     ssize_t units = 0;
     u32 code = 0;
+    bool repl = false;
 
     while(cur_pos < str_size)
     {
         units = decode_utf8(&code, ptr1);
         if (units < 0) break;
 
-        if (memchr(g_illegalFileSystemChars, (int)code, g_illegalFileSystemCharsLength) || code < 0x20 || (!ascii_only && code == 0x7F) || (ascii_only && code >= 0x7F))
+        if (code < 0x20 || (!ascii_only && code == 0x7F) || (ascii_only && code >= 0x7F) || \
+            (units == 1 && memchr(g_illegalFileSystemChars, (int)code, g_illegalFileSystemCharsLength)))
         {
-            *ptr2++ = '_';
+            if (!repl)
+            {
+                *ptr2++ = '_';
+                repl = true;
+            }
         } else {
             if (ptr2 != ptr1) memmove(ptr2, ptr1, (size_t)units);
             ptr2 += units;
+            repl = false;
         }
 
         ptr1 += units;
@@ -606,6 +612,76 @@ void utilsReplaceIllegalCharacters(char *str, bool ascii_only)
     }
 
     *ptr2 = '\0';
+}
+
+char *utilsEscapeCharacters(const char *str, const char *chars_to_escape, const char escape_char)
+{
+    size_t str_size = 0, chars_to_escape_size = 0;
+
+    if (!str || !(str_size = strlen(str)) || !chars_to_escape || !(chars_to_escape_size = strlen(chars_to_escape)) || \
+        escape_char < 0x20 || escape_char >= 0x7F)
+    {
+        LOG_MSG_ERROR("Invalid parameters!");
+        return NULL;
+    }
+
+    ssize_t units = 0;
+    u32 code = 0, escape_cnt = 0;
+    const u8 *ptr = (const u8*)str;
+    size_t cur_pos = 0, escaped_str_size = 0;
+    char *ret = NULL;
+
+    /* Determine the number of characters we need to escape. */
+    while(cur_pos < str_size)
+    {
+        units = decode_utf8(&code, ptr);
+        if (units < 0) break;
+
+        if (units == 1 && memchr(chars_to_escape, (int)code, chars_to_escape_size)) escape_cnt++;
+
+        ptr += units;
+        cur_pos += (size_t)units;
+    }
+
+    /* Short-circuit: check if we don't have to escape anything. */
+    /* If so, we'll just duplicate the provided string and call it a day. */
+    if (!escape_cnt)
+    {
+        ret = strdup(str);
+        goto end;
+    }
+
+    /* Calculate escaped string size. */
+    escaped_str_size = (str_size + escape_cnt);
+
+    /* Allocate memory for the output string. */
+    ret = calloc(sizeof(char), escaped_str_size + 1);
+    if (!ret)
+    {
+        LOG_MSG_ERROR("Failed to allocate memory for the output string! (0x%lX).", escaped_str_size + 1);
+        goto end;
+    }
+
+    /* Reset current position. */
+    ptr = (const u8*)str;
+    cur_pos = 0;
+
+    /* Copy characters and deal with the ones that need to be escaped. */
+    while(cur_pos < escaped_str_size)
+    {
+        units = decode_utf8(&code, ptr);
+        if (units < 0) break;
+
+        if (units == 1 && memchr(chars_to_escape, (int)code, chars_to_escape_size)) ret[cur_pos++] = escape_char;
+
+        for(ssize_t i = 0; i < units; i++) ret[cur_pos + (size_t)i] = ptr[i];
+
+        ptr += units;
+        cur_pos += (size_t)units;
+    }
+
+end:
+    return ret;
 }
 
 void utilsTrimString(char *str)
@@ -711,7 +787,7 @@ bool utilsGetFileSystemStatsByPath(const char *path, u64 *out_total, u64 *out_fr
     }
 
     name_end += 2;
-    sprintf(stat_path, "%.*s", (int)(name_end - path), path);
+    snprintf(stat_path, MAX_ELEMENTS(stat_path), "%.*s", (int)(name_end - path), path);
 
     if ((ret = statvfs(stat_path, &info)) != 0)
     {
@@ -723,24 +799,6 @@ bool utilsGetFileSystemStatsByPath(const char *path, u64 *out_total, u64 *out_fr
     if (out_free) *out_free = ((u64)info.f_bfree * (u64)info.f_frsize);
 
     return true;
-}
-
-void utilsCreateOutputDirectories(const char *device)
-{
-    size_t device_len = 0;
-    char path[FS_MAX_PATH] = {0};
-
-    if (device && (!(device_len = strlen(device)) || device[device_len - 1] != ':'))
-    {
-        LOG_MSG_ERROR("Invalid parameters!");
-        return;
-    }
-
-    for(size_t i = 0; i < g_outputDirsCount; i++)
-    {
-        sprintf(path, "%s%s", (device ? device : DEVOPTAB_SDMC_DEVICE), g_outputDirs[i]);
-        mkdir(path, 0744);
-    }
 }
 
 bool utilsCheckIfFileExists(const char *path)
@@ -783,25 +841,6 @@ bool utilsCreateConcatenationFile(const char *path)
     return R_SUCCEEDED(rc);
 }
 
-bool utilsCreateConcatenationFileWithSize(const char *path, size_t size)
-{
-    if (!path || !*path)
-    {
-        LOG_MSG_ERROR("Invalid parameters!");
-        return false;
-    }
-
-    /* Safety measure: remove any existant file/directory at the destination path. */
-    utilsRemoveConcatenationFile(path);
-
-    /* Create ConcatenationFile. */
-    /* If the call succeeds, the caller function will be able to operate on this file using stdio calls. */
-    Result rc = fsdevCreateFile(path, size, FsCreateOption_BigFile);
-    if (R_FAILED(rc)) LOG_MSG_ERROR("fsdevCreateFile failed for \"%s\"! (0x%X).", path, rc);
-
-    return R_SUCCEEDED(rc);
-}
-
 void utilsCreateDirectoryTree(const char *path, bool create_last_element)
 {
     char *ptr = NULL, *tmp = NULL;
@@ -825,12 +864,84 @@ void utilsCreateDirectoryTree(const char *path, bool create_last_element)
     free(tmp);
 }
 
+bool utilsGetDirectorySize(const char *path, u64 *out_size)
+{
+    u64 total_size = 0;
+    char *name_end = NULL, *entry_path = NULL;
+    DIR *dir = NULL;
+    struct dirent *entry = NULL;
+    struct stat st = {0};
+    bool success = false;
+
+    /* Sanity checks. */
+    if (!path || !*path || !(name_end = strchr(path, ':')) || *(name_end + 1) != '/' || !*(name_end + 2) || !out_size)
+    {
+        LOG_MSG_ERROR("Invalid parameters!");
+        return false;
+    }
+
+    if (!(dir = opendir(path)))
+    {
+        LOG_MSG_ERROR("Failed to open directory \"%s\"! (%d).", path, errno);
+        goto end;
+    }
+
+    if (!(entry_path = calloc(1, FS_MAX_PATH)))
+    {
+        LOG_MSG_ERROR("Failed to allocate memory for path buffer!");
+        goto end;
+    }
+
+    /* Read directory entries. */
+    while((entry = readdir(dir)))
+    {
+        /* Skip current directory and parent directory entries. */
+        if (!strcmp(".", entry->d_name) || !strcmp("..", entry->d_name)) continue;
+
+        /* Generate path to the current entry. */
+        snprintf(entry_path, FS_MAX_PATH, "%s/%s", path, entry->d_name);
+
+        if (entry->d_type == DT_DIR)
+        {
+            /* Get directory size. */
+            u64 dir_size = 0;
+            if (!utilsGetDirectorySize(entry_path, &dir_size)) goto end;
+
+            /* Update size. */
+            total_size += dir_size;
+        } else {
+            /* Get file properties. */
+            if (stat(entry_path, &st) != 0)
+            {
+                LOG_MSG_ERROR("Failed to stat file \"%s\"! (%d).", entry_path, errno);
+                goto end;
+            }
+
+            /* Update size. */
+            total_size += st.st_size;
+        }
+    }
+
+    /* Update output pointer. */
+    *out_size = total_size;
+
+    /* Update return value. */
+    success = true;
+
+end:
+    if (entry_path) free(entry_path);
+
+    if (dir) closedir(dir);
+
+    return success;
+}
+
 bool utilsDeleteDirectoryRecursively(const char *path)
 {
     char *name_end = NULL, *entry_path = NULL;
     DIR *dir = NULL;
     struct dirent *entry = NULL;
-    bool success = true;
+    bool success = false;
 
     /* Sanity checks. */
     if (!path || !*path || !(name_end = strchr(path, ':')) || *(name_end + 1) != '/' || !*(name_end + 2))
@@ -842,14 +953,12 @@ bool utilsDeleteDirectoryRecursively(const char *path)
     if (!(dir = opendir(path)))
     {
         LOG_MSG_ERROR("Failed to open directory \"%s\"! (%d).", path, errno);
-        success = false;
         goto end;
     }
 
     if (!(entry_path = calloc(1, FS_MAX_PATH)))
     {
         LOG_MSG_ERROR("Failed to allocate memory for path buffer!");
-        success = false;
         goto end;
     }
 
@@ -867,11 +976,7 @@ bool utilsDeleteDirectoryRecursively(const char *path)
         if (entry->d_type == DT_DIR)
         {
             /* Delete directory contents. */
-            if (!utilsDeleteDirectoryRecursively(entry_path))
-            {
-                success = false;
-                break;
-            }
+            if (!utilsDeleteDirectoryRecursively(entry_path)) goto end;
 
             /* Delete directory. */
             status = rmdir(entry_path);
@@ -882,20 +987,17 @@ bool utilsDeleteDirectoryRecursively(const char *path)
 
         if (status != 0)
         {
-            LOG_MSG_ERROR("Failed to delete \"%s\"! (%s, %d).", entry_path, entry->d_type == DT_DIR ? "dir" : "file", errno);
-            success = false;
-            break;
+            LOG_MSG_ERROR("Failed to delete %s \"%s\"! (%d).", entry->d_type == DT_DIR ? "directory" : "file", entry_path, errno);
+            goto end;
         }
     }
 
-    if (success)
-    {
-        closedir(dir);
-        dir = NULL;
+    /* Close topmost directory so we can delete it. */
+    closedir(dir);
+    dir = NULL;
 
-        success = (rmdir(path) == 0);
-        if (!success) LOG_MSG_ERROR("Failed to delete topmost directory \"%s\"! (%d).", path, errno);
-    }
+    success = (rmdir(path) == 0);
+    if (!success) LOG_MSG_ERROR("Failed to delete topmost directory \"%s\"! (%d).", path, errno);
 
 end:
     if (entry_path) free(entry_path);
@@ -964,35 +1066,52 @@ char *utilsGeneratePath(const char *prefix, const char *filename, const char *ex
         /* Get current path element size. */
         size_t element_size = (ptr2 ? (size_t)(ptr2 - ptr1) : (path_len - (size_t)(ptr1 - path)));
 
-        /* Get UTF-8 string limit. */
-        /* Use our max filename length as the byte count limit. */
-        size_t last_cp_pos = utilsGetUtf8StringLimit(ptr1, element_size, max_filename_len);
-        if (last_cp_pos < element_size)
+        /* Short-circuit: proceed onto the next path element right away if the current one fits within our max filename length. */
+        if (element_size <= max_filename_len)
         {
-            if (ptr2)
-            {
-                /* Truncate current element by moving the rest of the path to the current position. */
-                memmove(ptr1 + last_cp_pos, ptr2, path_len - (size_t)(ptr2 - path));
-
-                /* Update pointer. */
-                ptr2 -= (element_size - last_cp_pos);
-            } else
-            if (use_extension)
-            {
-                /* Truncate last element. Make sure to preserve the provided file extension. */
-                if (extension_len >= last_cp_pos)
-                {
-                    LOG_MSG_ERROR("File extension length is >= truncated filename length! (0x%lX >= 0x%lX).", extension_len, last_cp_pos);
-                    goto end;
-                }
-
-                memmove(ptr1 + last_cp_pos - extension_len, ptr1 + element_size - extension_len, extension_len);
-            }
-
-            path_len -= (element_size - last_cp_pos);
-            path[path_len] = '\0';
+            /* Update pointer. */
+            ptr1 = ptr2;
+            continue;
         }
 
+        /* Get UTF-8 string limit. */
+        /* We'll use our max filename length as the byte count limit. */
+        /* Make sure to preserve the file extension if it was provided and if we're dealing with the last path element. */
+        size_t byte_limit = ((ptr2 || !use_extension) ? max_filename_len : (max_filename_len - extension_len));
+
+        size_t last_cp_pos = utilsGetUtf8StringLimit(ptr1, element_size, byte_limit);
+        if (last_cp_pos > byte_limit)
+        {
+            /* Something went terribly wrong somewhere. */
+            LOG_MSG_ERROR("Unable to appropiately determine last UTF-8 codepoint position for path element \"%.*s\" in \"%s\" (%lu >= %lu).", (int)element_size, ptr1, path, last_cp_pos, byte_limit);
+            goto end;
+        }
+
+        /* Prepare variables for path truncation. */
+        char *ptr3 = NULL;
+        size_t move_size = 0, diff = (element_size - last_cp_pos);
+
+        if (ptr2)
+        {
+            ptr3 = ptr2;
+            move_size = (path_len - (size_t)(ptr2 - path));
+            ptr2 = (ptr1 + last_cp_pos);
+        } else
+        if (use_extension)
+        {
+            ptr3 = (ptr1 + element_size - extension_len);
+            move_size = extension_len;
+            diff -= extension_len;
+        }
+
+        /* Truncate path element by moving the rest of the path string to the last UTF-8 codepoint position, if needed. */
+        if (ptr3 && move_size) memmove(ptr1 + last_cp_pos, ptr3, move_size);
+
+        /* Update path length. */
+        path_len -= diff;
+        path[path_len] = '\0';
+
+        /* Update pointer. */
         ptr1 = ptr2;
     }
 
@@ -1041,7 +1160,12 @@ void utilsPrintConsoleError(const char *msg)
         printf("An error occurred.");
     }
 
+#if LOG_LEVEL < LOG_LEVEL_NONE
     printf("\n\nFor more information, please check the logfile. Press any button to exit.");
+#else
+    printf("\n\nPress any button to exit.");
+#endif
+
     consoleUpdate(NULL);
 
     /* Wait until the user presses a button. */
@@ -1188,18 +1312,64 @@ bool utilsIsApplicationUpdatable(const char *version, const char *commit_hash)
     return ret;
 }
 
-static void _utilsGetLaunchPath(int program_argc, const char **program_argv)
+static void _utilsGetLaunchPath(void)
 {
-    if (program_argc <= 0 || !program_argv) return;
+    if (__system_argc <= 0 || !__system_argv) return;
 
-    for(int i = 0; i < program_argc; i++)
+    for(int i = 0; i < __system_argc; i++)
     {
-        if (program_argv[i] && !strncmp(program_argv[i], DEVOPTAB_SDMC_DEVICE "/", strlen(DEVOPTAB_SDMC_DEVICE)))
+        if (__system_argv[i] && !strncmp(__system_argv[i], DEVOPTAB_SDMC_DEVICE "/", strlen(DEVOPTAB_SDMC_DEVICE)))
         {
-            g_appLaunchPath = program_argv[i];
+            g_appLaunchPath = __system_argv[i];
             break;
         }
     }
+}
+
+static bool _utilsGetSdCardFileSystemObject(void)
+{
+    g_sdCardFileSystem = fsdevGetDeviceFileSystem(DEVOPTAB_SDMC_DEVICE);
+    return (g_sdCardFileSystem != NULL);
+}
+
+static void _utilsGetNxLinkFileDescriptor(void)
+{
+    /* Check if a valid nxlink host IP address was set by libnx. */
+    if (__nxlink_host.s_addr == 0 || __nxlink_host.s_addr == INADDR_NONE) return;
+
+    /* Initialize nxlink connection without redirecting stdout nor stderr. */
+    g_nxLinkSocketFd = nxlinkConnectToHost(false, false);
+
+#if LOG_LEVEL <= LOG_LEVEL_INFO
+    if (g_nxLinkSocketFd >= 0) LOG_MSG_INFO("nxlink enabled! Host IP address: %s.", inet_ntoa(__nxlink_host));
+#endif
+}
+
+static void utilsCloseNxLinkFileDescriptor(void)
+{
+    if (g_nxLinkSocketFd < 0) return;
+    close(g_nxLinkSocketFd);
+    g_nxLinkSocketFd = -1;
+}
+
+/* SMC config item available in Atmosphère and Atmosphère-based CFWs. */
+static bool utilsGetExosphereApiVersion(void)
+{
+    Result rc = splGetConfig(SplConfigItem_ExosphereApiVersion, (u64*)&g_exosphereApiVersion);
+    bool ret = R_SUCCEEDED(rc);
+    if (!ret) LOG_MSG_ERROR("splGetConfig failed! (0x%X).", rc);
+    return ret;
+}
+
+/* SMC config item available in Atmosphère and Atmosphère-based CFWs. */
+static bool utilsGetExosphereEmummcType(void)
+{
+    u64 is_emummc = 0;
+    Result rc = splGetConfig(SplConfigItem_ExosphereEmummcType, &is_emummc);
+    bool ret = R_SUCCEEDED(rc);
+    g_exosphereIsEmummc = (ret && is_emummc);
+    if (!ret) LOG_MSG_ERROR("splGetConfig failed! (0x%X).", rc);
+    return ret;
 }
 
 static void _utilsGetCustomFirmwareType(void)
@@ -1228,7 +1398,7 @@ static bool _utilsGetProductModel(void)
     return ret;
 }
 
-static bool _utilsIsDevelopmentUnit(void)
+static bool utilsGetDevelopmentUnitFlag(void)
 {
     Result rc = 0;
     bool tmp = false;
@@ -1244,49 +1414,118 @@ static bool _utilsIsDevelopmentUnit(void)
     return R_SUCCEEDED(rc);
 }
 
-static bool utilsMountEmmcBisSystemPartitionStorage(void)
+static bool utilsGetTerraUnitFlag(void)
 {
+    /* Return right away if we're running under a HOS version that's too low. */
+    if (hosversionBefore(8, 0, 0)) return true;
+
     Result rc = 0;
-    FRESULT fr = FR_OK;
+    bool tmp = false;
 
-    rc = fsOpenBisStorage(&g_emmcBisSystemPartitionStorage, FsBisPartitionId_System);
-    if (R_FAILED(rc))
+    rc = setsysGetT(&tmp);
+    if (R_SUCCEEDED(rc))
     {
-        LOG_MSG_ERROR("Failed to open eMMC BIS System partition storage! (0x%X).", rc);
-        return false;
+        g_isTerraUnit = tmp;
+    } else {
+        LOG_MSG_ERROR("setsysGetT failed! (0x%X).", rc);
     }
 
-    g_emmcBisSystemPartitionFatFsObj = calloc(1, sizeof(FATFS));
-    if (!g_emmcBisSystemPartitionFatFsObj)
-    {
-        LOG_MSG_ERROR("Unable to allocate memory for FatFs element!");
-        return false;
-    }
-
-    fr = f_mount(g_emmcBisSystemPartitionFatFsObj, BIS_SYSTEM_PARTITION_MOUNT_NAME, 1);
-    if (fr != FR_OK)
-    {
-        LOG_MSG_ERROR("Failed to mount eMMC BIS System partition! (%u).", fr);
-        return false;
-    }
-
-    return true;
+    return R_SUCCEEDED(rc);
 }
 
-static void utilsUnmountEmmcBisSystemPartitionStorage(void)
+#if LOG_LEVEL <= LOG_LEVEL_INFO
+static void utilsLogEnvironmentInfo(void)
 {
-    if (g_emmcBisSystemPartitionFatFsObj)
+    u32 hos_version = hosversionGet();
+
+    LOG_MSG_INFO("Console info:\r\n" \
+                 "- Horizon OS version: %u.%u.%u.\r\n" \
+                 "- CFW: %s.\r\n" \
+                 "- eMMC type: %s.\r\n" \
+                 "- SoC type: %s.\r\n" \
+                 "- Development unit: %s.\r\n" \
+                 "- Terra flag: %s.\r\n" \
+                 "- Execution mode: %s.", \
+                 HOSVER_MAJOR(hos_version), HOSVER_MINOR(hos_version), HOSVER_MICRO(hos_version), \
+                 (g_customFirmwareType == UtilsCustomFirmwareType_Atmosphere ? "Atmosphère" : (g_customFirmwareType == UtilsCustomFirmwareType_SXOS ? "SX OS" : g_customFirmwareType == UtilsCustomFirmwareType_ReiNX ? "ReiNX" : "Unknown")), \
+                 g_exosphereIsEmummc ? "emuMMC" : "sysMMC", \
+                 utilsIsMarikoUnit() ? "Mariko" : "Erista", \
+                 g_isDevUnit ? "yes" : "no", \
+                 g_isTerraUnit ? "yes" : "no", \
+                 utilsIsAppletMode() ? "applet" : "title override");
+
+    LOG_MSG_INFO("Exosphère API version info:\r\n" \
+                 "- Release version: %u.%u.%u.\r\n" \
+                 "- PKG1 key generation: %u (0x%02X).\r\n" \
+                 "- Target firmware: %u.%u.%u.", \
+                 g_exosphereApiVersion.ams_ver_major, g_exosphereApiVersion.ams_ver_minor, g_exosphereApiVersion.ams_ver_micro, \
+                 g_exosphereApiVersion.key_generation, !g_exosphereApiVersion.key_generation ? g_exosphereApiVersion.key_generation : (g_exosphereApiVersion.key_generation + 1), \
+                 g_exosphereApiVersion.target_firmware.major, g_exosphereApiVersion.target_firmware.minor, g_exosphereApiVersion.target_firmware.micro);
+}
+#endif
+
+static bool utilsEnsureCorrectLaunchPath(void)
+{
+    if (!g_appLaunchPath) return true;
+
+    LOG_MSG_INFO("Launch path: \"%s\".", g_appLaunchPath);
+
+    /* Move NRO if the launch path isn't the right one, then return. */
+    /* TODO: uncomment this block whenever we are ready for a release. */
+    /*if (strcasecmp(g_appLaunchPath, NRO_PATH) != 0)
     {
-        f_unmount(BIS_SYSTEM_PARTITION_MOUNT_NAME);
-        free(g_emmcBisSystemPartitionFatFsObj);
-        g_emmcBisSystemPartitionFatFsObj = NULL;
+        utilsCreateDirectoryTree(NRO_PATH, false);
+        remove(NRO_PATH);
+        rename(g_appLaunchPath, NRO_PATH);
+
+        LOG_MSG_INFO("Moved NRO to \"%s\". Please reload the application.", NRO_PATH);
+        return false;
+    }*/
+
+   return true;
+}
+
+static void utilsEnableVideoRecording(void)
+{
+    /* Make sure we're running under title override mode. */
+    if (utilsIsAppletMode()) return;
+
+    Result rc = 0;
+    bool flag = false;
+
+    /* Check if video recording is supported at all. */
+    rc = appletIsGamePlayRecordingSupported(&flag);
+    if (R_SUCCEEDED(rc) && flag)
+    {
+        /* Try to enable video recording. */
+        rc = appletInitializeGamePlayRecording();
+        if (R_FAILED(rc)) LOG_MSG_ERROR("appletInitializeGamePlayRecording failed! (0x%X).", rc);
+    } else {
+        LOG_MSG_ERROR("appletIsGamePlayRecordingSupported returned [0x%X, %u].", rc, flag);
+    }
+}
+
+static void utilsPrintInitializationFailureMessage(void)
+{
+    char *msg = NULL;
+    size_t msg_size = 0;
+
+    /* Generate error message. */
+    utilsAppendFormattedStringToBuffer(&msg, &msg_size, "An error occurred while initializing resources.");
+
+    /* Get last log message. */
+    char *log_msg = logGetLastMessage();
+    if (log_msg)
+    {
+        utilsAppendFormattedStringToBuffer(&msg, &msg_size, "\n\n%s", log_msg);
+        free(log_msg);
     }
 
-    if (serviceIsActive(&(g_emmcBisSystemPartitionStorage.s)))
-    {
-        fsStorageClose(&g_emmcBisSystemPartitionStorage);
-        memset(&g_emmcBisSystemPartitionStorage, 0, sizeof(FsStorage));
-    }
+    /* Print error message. */
+    utilsPrintConsoleError(msg);
+
+    /* Free error message. */
+    if (msg) free(msg);
 }
 
 static void utilsOverclockSystem(bool overclock)
@@ -1298,7 +1537,7 @@ static void utilsOverclockSystem(bool overclock)
 
 static void utilsOverclockSystemAppletHook(AppletHookType hook, void *param)
 {
-    (void)param;
+    NX_IGNORE_ARG(param);
 
     /* Don't proceed if we're not dealing with a desired hook type. */
     if (hook != AppletHookType_OnOperationMode && hook != AppletHookType_OnPerformanceMode) return;
@@ -1324,24 +1563,30 @@ static size_t utilsGetUtf8StringLimit(const char *str, size_t str_size, size_t b
 {
     if (!str || !*str || !str_size || !byte_limit) return 0;
 
+    /* Short-circuit: return immediately if we have enough space to hold the full string. */
     if (byte_limit > str_size) return str_size;
 
     u32 code = 0;
     ssize_t units = 0;
-    size_t cur_pos = 0, last_cp_pos = 0;
-    const u8 *str_u8 = (const u8*)str;
+    size_t cur_pos = 0;
+    const u8 *ptr = (const u8*)str;
 
-    while(cur_pos < str_size && cur_pos < byte_limit)
-    {
-        units = decode_utf8(&code, str_u8 + cur_pos);
+    do {
+        /* Decode current codepoint. */
+        units = decode_utf8(&code, ptr);
+        if (units < 0) break;
+
+        /* Calculate new position within the input string. */
+        /* Bail out immediately if we have exceeded a size limitation. */
         size_t new_pos = (cur_pos + (size_t)units);
-        if (units < 0 || !code || new_pos > str_size) break;
+        if (new_pos > str_size || new_pos > byte_limit) break;
 
+        /* Update current position. */
         cur_pos = new_pos;
-        if (cur_pos < byte_limit) last_cp_pos = cur_pos;
-    }
+        ptr += units;
+    } while(code != 0);
 
-    return last_cp_pos;
+    return cur_pos;
 }
 
 static char utilsConvertHexDigitToBinary(char c)
