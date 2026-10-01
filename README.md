@@ -4,8 +4,7 @@
 - Updating this branch to the latest nxdumptool release
 - Fix the `consoleClear()` from [#15](https://github.com/Istador/odyssey-downgrade/issues/15)
 
-
-
+## V Everything at the bottom is unchanged V
 
 # nxdumptool
 <img width="200" src="romfs/icon/nxdumptool.jpg">
